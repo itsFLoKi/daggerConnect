@@ -452,7 +452,6 @@ vnstat -l
 
 - 🐛 [Report Bugs](https://github.com/itsFLoKi/DaggerConnect/issues)
 - 💬 [Discussions](https://github.com/itsFLoKi/DaggerConnect/discussions)
-- 📧 Telegram : @CentralFourOne
 
 ---
 
@@ -461,5 +460,6 @@ vnstat -l
 ⭐ اگه مفید بود یه ستاره بدید!
 
 [⬆ برگشت به بالا](#-DaggerConnect)
+
 
 </div>
