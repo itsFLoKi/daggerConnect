@@ -124,7 +124,7 @@ sudo ./setup.sh
 ```
 پورت: 443
 PSK: کد لایسنس که از ربات گرفته اید
-Transport: httpsmux (توصیه می‌شود)
+Transport: HTTPmux (توصیه می‌شود)
 Profile: balanced یا aggressive
 ```
 
@@ -196,7 +196,7 @@ Profile: همان profile سرور
 
 ```
 Server #1:
-  Transport: httpsmux
+  Transport: HTTPmux
   Address: 1.2.3.4:443
   Connection Pool: 3
   Retry Interval: 3
@@ -388,14 +388,14 @@ raw_socket:
 
 ### انتخاب Transport مناسب
 
-| Transport | Port | امنیت | DPI Bypass | سرعت | کاربرد |
-|-----------|------|-------|------------|------|--------|
-| **httpsmux** | 443 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | **توصیه می‌شود** |
-| **httpmux** | 80 | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | بدون TLS |
-| **wssmux** | 443 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐ | WebSocket + TLS |
-| **wsmux** | 80 | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐ | WebSocket |
-| **kcpmux** | UDP | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | سرعت بالا |
-| **tcpmux** | Any | ⭐⭐⭐ | ⭐⭐ | ⭐⭐⭐⭐ | ساده و سریع |
+| Transport | Port | امنیت | DPI Bypass | سرعت | کاربرد               |
+|-----------|------|-------|------------|------|----------------------|
+| **httpsmux** | 443 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | **با TLS**           |
+| **httpmux** | 80 | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ |  توصیه میشود |
+| **wssmux** | 443 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐ | WebSocket + TLS      |
+| **wsmux** | 80 | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐ | WebSocket            |
+| **kcpmux** | UDP | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | سرعت بالا            |
+| **tcpmux** | Any | ⭐⭐⭐ | ⭐⭐ | ⭐⭐⭐⭐ | ساده و سریع          |
 
 ### HTTP Mimicry Configuration
 
@@ -539,13 +539,10 @@ listeners:
 ```yaml
 mode: "server"
 listen: "0.0.0.0:443"
-transport: "httpsmux"
+transport: "httpmux"
 psk: "License-@DAGGERCONNECBOT"
 profile: "aggressive"
 verbose: false
-
-cert_file: "/etc/DaggerConnect/certs/cert.pem"
-key_file: "/etc/DaggerConnect/certs/key.pem"
 
 maps:
   - type: tcp
@@ -579,7 +576,7 @@ psk: "License-@DAGGERCONNECBOT"
 profile: "aggressive"
 
 paths:
-  - transport: "httpsmux"
+  - transport: "httpmux"
     addr: "1.2.3.4:443"
     connection_pool: 3
     retry_interval: 3
@@ -626,14 +623,14 @@ psk: "License-@DAGGERCONNECBOT"
 
 paths:
   # Primary
-  - transport: "httpsmux"
+  - transport: "httpmux"
     addr: "server1.com:443"
     connection_pool: 3
     weight: 3
     priority: 0
   
   # Backup 1
-  - transport: "httpsmux"
+  - transport: "httpmux"
     addr: "server2.com:443"
     connection_pool: 2
     weight: 2
