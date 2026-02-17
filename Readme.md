@@ -123,7 +123,7 @@ sudo ./setup.sh
 #### مرحله 2: تنظیمات پایه
 ```
 پورت: 443
-PSK: یک رمز قوی (32+ کاراکتر)
+PSK: کد لایسنس که از ربات گرفته اید
 Transport: httpsmux (توصیه می‌شود)
 Profile: balanced یا aggressive
 ```
@@ -540,7 +540,7 @@ listeners:
 mode: "server"
 listen: "0.0.0.0:443"
 transport: "httpsmux"
-psk: "my-secure-key-32chars-long!@#$"
+psk: "License-@DAGGERCONNECBOT"
 profile: "aggressive"
 verbose: false
 
@@ -575,7 +575,7 @@ obfuscation:
 #### Client (خارج)
 ```yaml
 mode: "client"
-psk: "my-secure-key-32chars-long!@#$"
+psk: "License-@DAGGERCONNECBOT"
 profile: "aggressive"
 
 paths:
@@ -622,7 +622,7 @@ obfuscation:
 ```yaml
 # client.yaml
 mode: "client"
-psk: "failover-secure-key-123456789!@#"
+psk: "License-@DAGGERCONNECBOT"
 
 paths:
   # Primary
@@ -661,7 +661,7 @@ load_balancer:
 mode: "server"
 listen: "0.0.0.0:4000"
 transport: "kcpmux"
-psk: "gaming-key"
+psk: "License-@DAGGERCONNECBOT"
 profile: "gaming"
 
 maps:
