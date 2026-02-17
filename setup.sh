@@ -11,7 +11,7 @@ LATEST_RELEASE_API="https://api.github.com/repos/itsFLoKi/DaggerConnect/releases
 banner() {
     clear
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}       DaggerConnect Installer v1.5${NC}"
+    echo -e "${GREEN}       DaggerConnect Installer v1.4.1${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BLUE}  Telegram: @DaggerConnect${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -34,7 +34,7 @@ download_binary() {
     echo -e "${YELLOW}Downloading DaggerConnect...${NC}"
     mkdir -p "$INSTALL_DIR"
     LATEST_VERSION=$(curl -s "$LATEST_RELEASE_API" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    [[ -z "$LATEST_VERSION" ]] && LATEST_VERSION="v1.5"
+    [[ -z "$LATEST_VERSION" ]] && LATEST_VERSION="v1.4.1"
     BINARY_URL="https://github.com/itsFLoKi/DaggerConnect/releases/download/${LATEST_VERSION}/DaggerConnect"
     echo -e "  Version: ${GREEN}${LATEST_VERSION}${NC}"
     [[ -f "$INSTALL_DIR/DaggerConnect" ]] && cp "$INSTALL_DIR/DaggerConnect" "$INSTALL_DIR/DaggerConnect.bak"
