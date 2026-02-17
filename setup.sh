@@ -11,7 +11,7 @@ LATEST_RELEASE_API="https://api.github.com/repos/itsFLoKi/DaggerConnect/releases
 banner() {
     clear
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}       DaggerConnect Installer${NC}"
+    echo -e "${GREEN}       DaggerConnect Installer v1.5${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BLUE}  Telegram: @DaggerConnect${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -34,7 +34,7 @@ download_binary() {
     echo -e "${YELLOW}Downloading DaggerConnect...${NC}"
     mkdir -p "$INSTALL_DIR"
     LATEST_VERSION=$(curl -s "$LATEST_RELEASE_API" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    [[ -z "$LATEST_VERSION" ]] && LATEST_VERSION="v1.4"
+    [[ -z "$LATEST_VERSION" ]] && LATEST_VERSION="v1.5"
     BINARY_URL="https://github.com/itsFLoKi/DaggerConnect/releases/download/${LATEST_VERSION}/DaggerConnect"
     echo -e "  Version: ${GREEN}${LATEST_VERSION}${NC}"
     [[ -f "$INSTALL_DIR/DaggerConnect" ]] && cp "$INSTALL_DIR/DaggerConnect" "$INSTALL_DIR/DaggerConnect.bak"
@@ -90,10 +90,6 @@ EOF
     systemctl daemon-reload
     echo -e "${GREEN}Service DaggerConnect-${mode} created${NC}"
 }
-
-# ============================================================================
-# SYSTEM OPTIMIZER
-# ============================================================================
 
 optimize_system() {
     echo -e "${CYAN}━━━ System Optimization ━━━${NC}"
@@ -163,10 +159,6 @@ SYSEOF
     echo -e "${GREEN}System optimized${NC}"
 }
 
-# ============================================================================
-# PORT MAPPING COLLECTOR
-# ============================================================================
-
 collect_port_mappings() {
     MAPPINGS=""
     MAP_COUNT=0
@@ -226,10 +218,6 @@ collect_port_mappings() {
     }
 }
 
-# ============================================================================
-# DEFAULTS PER PROFILE
-# ============================================================================
-
 set_defaults() {
     local p=$1
     case $p in
@@ -248,7 +236,6 @@ set_defaults() {
     V_HTTP_UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     V_HTTP_CHUNK=false; V_HTTP_COOK=true
     V_DPI_ON=false; V_DPI_SNI=true; V_DPI_TTL=false; V_DPI_SEG=1200; V_DPI_PACE=2; V_DPI_JITTER=1
-    # Raw Socket - defaults matched to kcpmux (MTU=1400, buffer=2MB)
     V_RAW_ON=false; V_RAW_IFACE="eth0"; V_RAW_LIP="0.0.0.0"; V_RAW_LPORT=0
     V_RAW_GWMAC="00:00:00:00:00:00"; V_RAW_BATCH=32; V_RAW_BUF=2097152; V_RAW_COAL=1
     V_RAW_MTU=1400; V_RAW_ZC=false; V_RAW_MINTTL=64; V_RAW_MAXTTL=128
@@ -257,10 +244,6 @@ set_defaults() {
     V_LB_STRAT="round_robin"; V_LB_HEALTH=10; V_LB_FAIL_DLY=500; V_LB_MAXFAIL=3; V_LB_RECOV=30; V_LB_STICKY=false
     V_MAX_SESS=0; V_HEARTBEAT=10; V_VERBOSE=false
 }
-
-# ============================================================================
-# ADVANCED EDITOR
-# ============================================================================
 
 edit_advanced() {
     echo ""
@@ -300,7 +283,6 @@ edit_advanced() {
     echo -e "${YELLOW}Raw Socket (DPI Bypass via pcap):${NC}"
     read -p "  enabled [$V_RAW_ON]: " v; V_RAW_ON=${v:-$V_RAW_ON}
     if [[ "$V_RAW_ON" == "true" ]]; then
-        # Auto-detect interface and IP
         local auto_iface=$(ip link show | grep "state UP" | head -1 | awk '{print $2}' | cut -d: -f1)
         local auto_ip=$(ip -4 addr show "${auto_iface:-eth0}" | grep -oP 'inet \K[\d.]+' | head -1)
         local auto_gw_ip=$(ip route | grep default | awk '{print $3}' | head -1)
@@ -324,30 +306,37 @@ edit_advanced() {
 }
 
 # ============================================================================
-# CONFIG WRITERS
+# ✅ NEW: Per-listener configuration format
 # ============================================================================
 
 write_server_yaml() {
     local f="$CONFIG_DIR/server.yaml"
     cat > "$f" << YAML
 mode: server
-listen: "0.0.0.0:${V_LISTEN_PORT}"
-transport: "${V_TRANSPORT}"
 psk: "${V_PSK}"
 profile: "${V_PROFILE}"
 verbose: ${V_VERBOSE}
 max_sessions: ${V_MAX_SESS}
 heartbeat: ${V_HEARTBEAT}
+
+listeners:
+  - addr: "0.0.0.0:${V_LISTEN_PORT}"
+    transport: "${V_TRANSPORT}"
 YAML
 
-    [[ -n "$V_CERT" ]] && cat >> "$f" << YAML
-cert_file: "${V_CERT}"
-key_file: "${V_KEY}"
+    # Add cert/key if TLS transport
+    if [[ -n "$V_CERT" ]]; then
+        cat >> "$f" << YAML
+    cert_file: "${V_CERT}"
+    key_file: "${V_KEY}"
 YAML
+    fi
 
-    echo -e "\nmaps:" >> "$f"
-    echo -e "$MAPPINGS" >> "$f"
+    # Add mappings with proper indentation for per-listener format
+    echo "    maps:" >> "$f"
+    echo -e "$MAPPINGS" | sed 's/^/    /' >> "$f"
 
+    # Rest of the config (SMUX, KCP, Advanced, etc.)
     cat >> "$f" << YAML
 
 smux:
@@ -534,7 +523,6 @@ raw_socket:
 YAML
     echo -e "${GREEN}Config: $f${NC}"
 }
-# ============================================================================
 
 select_transport() {
     echo ""
@@ -559,27 +547,19 @@ select_profile() {
     case $pc in 2) V_PROFILE="aggressive" ;; 3) V_PROFILE="latency" ;; *) V_PROFILE="balanced" ;; esac
 }
 
-# ============================================================================
-# AUTO RAW SOCKET SETUP
-# ============================================================================
-
 auto_setup_raw_socket() {
     echo ""
     echo -e "${YELLOW}  Auto-detecting network...${NC}"
 
-    # Auto-detect interface
     local iface=$(ip link show | grep "state UP" | head -1 | awk '{print $2}' | cut -d: -f1)
     [[ -z "$iface" ]] && iface="eth0"
 
-    # Auto-detect local IP
     local lip=$(ip -4 addr show "$iface" 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
     [[ -z "$lip" ]] && lip="0.0.0.0"
 
-    # Auto-detect gateway MAC
     local gw_ip=$(ip route | grep default | awk '{print $3}' | head -1)
     local gw_mac=""
     if [[ -n "$gw_ip" ]]; then
-        # Ping gateway to populate ARP table
         ping -c 1 -W 1 "$gw_ip" > /dev/null 2>&1
         gw_mac=$(ip neigh show "$gw_ip" 2>/dev/null | awk '{print $5}' | head -1)
     fi
@@ -593,14 +573,12 @@ auto_setup_raw_socket() {
     V_RAW_LIP="$lip"
     V_RAW_GWMAC="$gw_mac"
 
-    # Port: use tunnel port or ask
     if [[ -n "$V_LISTEN_PORT" ]]; then
         V_RAW_LPORT=$V_LISTEN_PORT
     else
         read -p "    Raw socket port [443]: " rp; V_RAW_LPORT=${rp:-443}
     fi
 
-    # Desync method
     echo ""
     echo -e "${YELLOW}  Desync Method:${NC}"
     echo "    1) split (split packet in 2 fragments) [default]"
@@ -613,7 +591,6 @@ auto_setup_raw_socket() {
         *) V_RAW_DESYNC="split" ;;
     esac
 
-    # Warn if gateway MAC not found
     if [[ "$gw_mac" == "00:00:00:00:00:00" ]]; then
         echo ""
         echo -e "${YELLOW}  Warning: Gateway MAC not detected.${NC}"
@@ -622,10 +599,6 @@ auto_setup_raw_socket() {
         [[ -n "$manual_mac" ]] && V_RAW_GWMAC="$manual_mac"
     fi
 }
-
-# ============================================================================
-# SERVER INSTALLER
-# ============================================================================
 
 install_server() {
     banner
@@ -646,7 +619,6 @@ install_server() {
     select_profile
     set_defaults "$V_PROFILE"
 
-    # TLS cert
     V_CERT=""; V_KEY=""
     if [[ "$V_TRANSPORT" == "httpsmux" || "$V_TRANSPORT" == "wssmux" ]]; then
         read -p "  Cert domain [$V_HTTP_DOM]: " cd; cd=${cd:-$V_HTTP_DOM}
@@ -656,7 +628,6 @@ install_server() {
 
     collect_port_mappings
 
-    # DPI Bypass options (both auto and manual)
     echo ""
     echo -e "${CYAN}━━━ DPI Bypass ━━━${NC}"
     echo "  1) Off (default)"
@@ -686,7 +657,6 @@ install_server() {
             ;;
     esac
 
-    # Manual: advanced editing
     if [[ "$inst_mode" == "2" ]]; then
         read -p "  Verbose? [y/N]: " vb; [[ $vb =~ ^[Yy]$ ]] && V_VERBOSE=true
         read -p "  Heartbeat sec [$V_HEARTBEAT]: " v; V_HEARTBEAT=${v:-$V_HEARTBEAT}
@@ -714,10 +684,6 @@ install_server() {
     read -p "Press Enter..."
     main_menu
 }
-
-# ============================================================================
-# CLIENT INSTALLER
-# ============================================================================
 
 collect_client_paths() {
     V_PATHS_BLOCK="paths:"
@@ -773,7 +739,6 @@ install_client() {
 
     collect_client_paths
 
-    # LB config if multiple servers
     if [[ $PATH_COUNT -gt 1 ]]; then
         echo ""
         echo -e "${YELLOW}  Load Balancer Strategy:${NC}"
@@ -785,7 +750,6 @@ install_client() {
         case $lbc in 2) V_LB_STRAT="least_loaded" ;; 3) V_LB_STRAT="failover" ;; 4) V_LB_STRAT="weighted_random" ;; *) V_LB_STRAT="round_robin" ;; esac
     fi
 
-    # DPI Bypass options (both auto and manual)
     echo ""
     echo -e "${CYAN}━━━ DPI Bypass ━━━${NC}"
     echo "  1) Off (default)"
@@ -815,7 +779,6 @@ install_client() {
             ;;
     esac
 
-    # Manual: advanced editing
     if [[ "$inst_mode" == "2" ]]; then
         read -p "  Verbose? [y/N]: " vb; [[ $vb =~ ^[Yy]$ ]] && V_VERBOSE=true
         read -p "  Heartbeat sec [$V_HEARTBEAT]: " v; V_HEARTBEAT=${v:-$V_HEARTBEAT}
@@ -844,10 +807,6 @@ install_client() {
     main_menu
 }
 
-# ============================================================================
-# UPDATE BINARY
-# ============================================================================
-
 update_binary() {
     banner
     echo -e "${CYAN}━━━ Update Core ━━━${NC}"
@@ -869,10 +828,6 @@ update_binary() {
     main_menu
 }
 
-# ============================================================================
-# UNINSTALL
-# ============================================================================
-
 uninstall() {
     banner
     echo -e "${RED}━━━ Uninstall DaggerConnect ━━━${NC}"
@@ -891,10 +846,6 @@ uninstall() {
     echo -e "${GREEN}Uninstalled${NC}"
     exit 0
 }
-
-# ============================================================================
-# MAIN MENU
-# ============================================================================
 
 main_menu() {
     banner
@@ -924,10 +875,6 @@ main_menu() {
         *) main_menu ;;
     esac
 }
-
-# ============================================================================
-# ENTRY
-# ============================================================================
 
 check_root
 banner
