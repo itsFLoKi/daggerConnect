@@ -503,25 +503,36 @@ load_balancer:
 ---
 
 ## 💾 Multi-Listener (Server)
+- توجه کنید در این بخش حتما پورت کانفیگاتون در سرور هاتون برای اینکه اختلال نیفته تو بار زیاد ، متفاوت بزنید همچنین میتونید ترنسپورت ثابت یا متغیر مثل مثال پایین بزنید 
 
 ```yaml
 # server.yaml
 mode: "server"
 
 listeners:
-  # Listener 1: HTTPS
-  - addr: "0.0.0.0:443"
-    transport: "httpsmux"
-    cert_file: "/etc/DaggerConnect/certs/cert.pem"
-    key_file: "/etc/DaggerConnect/certs/key.pem"
-  
-  # Listener 2: HTTP
-  - addr: "0.0.0.0:80"
-    transport: "httpmux"
-  
-  # Listener 3: KCP
-  - addr: "0.0.0.0:4000"
-    transport: "kcpmux"
+   #Server 1 Kharej
+   - addr: "0.0.0.0:443"
+     transport: "httpsmux"
+     cert_file: "/etc/DaggerConnect/certs/cert.pem"
+     key_file: "/etc/DaggerConnect/certs/key.pem"
+     maps:
+        - type: tcp
+          bind: "0.0.0.0:8664"
+          target: "127.0.0.1:8664"
+   #Server 2 Kharej      
+   - addr: "0.0.0.0:4000"
+     transport: "httpmux"
+     maps:
+        - type: tcp
+          bind: "0.0.0.0:5456"
+          target: "127.0.0.1:5456"
+   #Server 3 Kharej      
+   - addr: "0.0.0.0:8080"
+     transport: "kcpmux"
+     maps:
+        - type: tcp
+          bind: "0.0.0.0:6000"
+          target: "127.0.0.1:6000"
 ```
 
 **مزایا:**
