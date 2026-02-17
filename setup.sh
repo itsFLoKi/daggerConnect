@@ -11,7 +11,7 @@ LATEST_RELEASE_API="https://api.github.com/repos/itsFLoKi/DaggerConnect/releases
 banner() {
     clear
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}       DaggerConnect Installer v1.4.1${NC}"
+    echo -e "${GREEN}       DaggerConnect Installer${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BLUE}  Telegram: @DaggerConnect${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -33,15 +33,30 @@ install_deps() {
 download_binary() {
     echo -e "${YELLOW}Downloading DaggerConnect...${NC}"
     mkdir -p "$INSTALL_DIR"
+
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64)        BINARY_ARCH="linux-amd64"  ;;
+        *)
+            echo -e "${RED}Unsupported architecture: $ARCH${NC}"
+            exit 1
+            ;;
+    esac
+
     LATEST_VERSION=$(curl -s "$LATEST_RELEASE_API" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    [[ -z "$LATEST_VERSION" ]] && LATEST_VERSION="v1.4.1"
-    BINARY_URL="https://github.com/itsFLoKi/DaggerConnect/releases/download/${LATEST_VERSION}/DaggerConnect"
-    echo -e "  Version: ${GREEN}${LATEST_VERSION}${NC}"
+    [[ -z "$LATEST_VERSION" ]] && LATEST_VERSION="v1.4.2"
+
+    BINARY_URL="https://github.com/itsFLoKi/DaggerConnect/releases/download/${LATEST_VERSION}/DaggerConnect-${BINARY_ARCH}"
+
+    echo -e "  Version:  ${GREEN}${LATEST_VERSION}${NC}"
+    echo -e "  Arch:     ${GREEN}${BINARY_ARCH}${NC}"
+
     [[ -f "$INSTALL_DIR/DaggerConnect" ]] && cp "$INSTALL_DIR/DaggerConnect" "$INSTALL_DIR/DaggerConnect.bak"
+
     if wget -q --show-progress "$BINARY_URL" -O "$INSTALL_DIR/DaggerConnect"; then
         chmod +x "$INSTALL_DIR/DaggerConnect"
         rm -f "$INSTALL_DIR/DaggerConnect.bak"
-        echo -e "${GREEN}Downloaded${NC}"
+        echo -e "${GREEN}Downloaded successfully${NC}"
     else
         echo -e "${RED}Download failed${NC}"
         [[ -f "$INSTALL_DIR/DaggerConnect.bak" ]] && mv "$INSTALL_DIR/DaggerConnect.bak" "$INSTALL_DIR/DaggerConnect"
@@ -618,7 +633,6 @@ install_server() {
             ;;
     esac
 
-    # DPI Bypass (server = Iran side)
     echo ""
     echo -e "${CYAN}━━━ DPI Bypass ━━━${NC}"
     echo "  1) Off (default)"
@@ -633,7 +647,6 @@ install_server() {
         *) echo -e "  DPI Bypass: off" ;;
     esac
 
-    # Manual mode: advanced editing
     if [[ "$inst_mode" == "3" ]]; then
         read -p "  Heartbeat sec [$V_HEARTBEAT]: " v; V_HEARTBEAT=${v:-$V_HEARTBEAT}
         read -p "  Edit advanced? [y/N]: " ea; [[ $ea =~ ^[Yy]$ ]] && edit_advanced
@@ -652,9 +665,9 @@ install_server() {
     echo ""
     echo -e "${GREEN}━━━ Server Ready ━━━${NC}"
     echo -e "  Listeners: ${GREEN}${LISTENER_COUNT}${NC}"
-    echo -e "  Profile: ${GREEN}${V_PROFILE}${NC}"
-    echo -e "  Config: $CONFIG_DIR/server.yaml"
-    echo -e "  Logs: journalctl -u DaggerConnect-server -f"
+    echo -e "  Profile:   ${GREEN}${V_PROFILE}${NC}"
+    echo -e "  Config:    $CONFIG_DIR/server.yaml"
+    echo -e "  Logs:      journalctl -u DaggerConnect-server -f"
     echo ""
     read -p "Press Enter..."
     main_menu
@@ -740,10 +753,10 @@ install_client() {
     echo ""
     echo -e "${GREEN}━━━ Client Ready ━━━${NC}"
     echo -e "  Servers: ${GREEN}${PATH_COUNT}${NC}"
-    echo -e "  LB: ${GREEN}${V_LB_STRAT}${NC}"
+    echo -e "  LB:      ${GREEN}${V_LB_STRAT}${NC}"
     echo -e "  Profile: ${GREEN}${V_PROFILE}${NC}"
-    echo -e "  Config: $CONFIG_DIR/client.yaml"
-    echo -e "  Logs: journalctl -u DaggerConnect-client -f"
+    echo -e "  Config:  $CONFIG_DIR/client.yaml"
+    echo -e "  Logs:    journalctl -u DaggerConnect-client -f"
     echo ""
     read -p "Press Enter..."
     main_menu
