@@ -44,7 +44,7 @@ download_binary() {
     esac
 
     LATEST_VERSION=$(curl -s "$LATEST_RELEASE_API" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    [[ -z "$LATEST_VERSION" ]] && LATEST_VERSION="v1.4.2"
+    [[ -z "$LATEST_VERSION" ]] && LATEST_VERSION="v1.4.3"
 
     BINARY_URL="https://github.com/itsFLoKi/DaggerConnect/releases/download/${LATEST_VERSION}/DaggerConnect-${BINARY_ARCH}"
 
@@ -123,10 +123,9 @@ optimize_system() {
     sysctl -w net.ipv4.tcp_sack=1 > /dev/null 2>&1
     sysctl -w net.ipv4.tcp_retries2=6 > /dev/null 2>&1
     sysctl -w net.ipv4.tcp_syn_retries=2 > /dev/null 2>&1
-    sysctl -w net.core.netdev_max_backlog=1000 > /dev/null 2>&1
-    sysctl -w net.core.somaxconn=512 > /dev/null 2>&1
+    sysctl -w net.core.netdev_max_backlog=65535 > /dev/null 2>&1
+    sysctl -w net.core.somaxconn=65535 > /dev/null 2>&1
     sysctl -w net.ipv4.tcp_fastopen=3 > /dev/null 2>&1
-    sysctl -w net.ipv4.tcp_low_latency=1 > /dev/null 2>&1
     sysctl -w net.ipv4.tcp_slow_start_after_idle=0 > /dev/null 2>&1
     sysctl -w net.ipv4.tcp_no_metrics_save=1 > /dev/null 2>&1
     sysctl -w net.ipv4.tcp_autocorking=0 > /dev/null 2>&1
@@ -135,9 +134,10 @@ optimize_system() {
     sysctl -w net.ipv4.tcp_keepalive_intvl=10 > /dev/null 2>&1
     sysctl -w net.ipv4.tcp_keepalive_probes=3 > /dev/null 2>&1
     sysctl -w net.ipv4.tcp_fin_timeout=15 > /dev/null 2>&1
+    sysctl -w fs.file-max=1000000 > /dev/null 2>&1
     modprobe tcp_bbr 2>/dev/null && {
         sysctl -w net.ipv4.tcp_congestion_control=bbr > /dev/null 2>&1
-        sysctl -w net.core.default_qdisc=fq_codel > /dev/null 2>&1
+        sysctl -w net.core.default_qdisc=fq > /dev/null 2>&1
     }
     tc qdisc del dev $IFACE root 2>/dev/null
     tc qdisc add dev $IFACE root fq_codel limit 500 target 3ms interval 50ms quantum 300 ecn 2>/dev/null
@@ -154,10 +154,9 @@ net.ipv4.tcp_timestamps=1
 net.ipv4.tcp_sack=1
 net.ipv4.tcp_retries2=6
 net.ipv4.tcp_syn_retries=2
-net.core.netdev_max_backlog=1000
-net.core.somaxconn=512
+net.core.netdev_max_backlog=65535
+net.core.somaxconn=65535
 net.ipv4.tcp_fastopen=3
-net.ipv4.tcp_low_latency=1
 net.ipv4.tcp_slow_start_after_idle=0
 net.ipv4.tcp_no_metrics_save=1
 net.ipv4.tcp_autocorking=0
@@ -167,8 +166,15 @@ net.ipv4.tcp_keepalive_intvl=10
 net.ipv4.tcp_keepalive_probes=3
 net.ipv4.tcp_fin_timeout=15
 net.ipv4.tcp_congestion_control=bbr
-net.core.default_qdisc=fq_codel
+net.core.default_qdisc=fq
+fs.file-max=1000000
 SYSEOF
+
+    cat >> /etc/security/limits.conf << 'LIMEOF'
+* soft nofile 1000000
+* hard nofile 1000000
+LIMEOF
+
     echo -e "${GREEN}System optimized${NC}"
 }
 
@@ -235,26 +241,20 @@ collect_port_mappings() {
 set_defaults() {
     local p=$1
     case $p in
-        aggressive) V_SMUX_KA=5;  V_SMUX_RECV=16777216; V_SMUX_STREAM=16777216; V_KCP_INT=8;  V_KCP_SNDWND=2048; V_KCP_RCVWND=2048 ;;
-        latency)    V_SMUX_KA=3;  V_SMUX_RECV=4194304;  V_SMUX_STREAM=4194304;  V_KCP_INT=8;  V_KCP_SNDWND=1024; V_KCP_RCVWND=1024 ;;
-        *)          V_SMUX_KA=8;  V_SMUX_RECV=8388608;  V_SMUX_STREAM=8388608;  V_KCP_INT=10; V_KCP_SNDWND=1024; V_KCP_RCVWND=1024 ;;
+        aggressive) V_SMUX_KA=5;  V_SMUX_RECV=8388608;  V_SMUX_STREAM=8388608;  V_KCP_INT=8;  V_KCP_SNDWND=2048; V_KCP_RCVWND=2048 ;;
+        latency)    V_SMUX_KA=3;  V_SMUX_RECV=2097152;  V_SMUX_STREAM=2097152;  V_KCP_INT=8;  V_KCP_SNDWND=1024; V_KCP_RCVWND=1024 ;;
+        *)          V_SMUX_KA=15; V_SMUX_RECV=4194304;  V_SMUX_STREAM=4194304;  V_KCP_INT=10; V_KCP_SNDWND=1024; V_KCP_RCVWND=1024 ;;
     esac
     V_SMUX_FRAME=32768; V_SMUX_VER=2
     V_KCP_NODELAY=1; V_KCP_RESEND=2; V_KCP_NC=1; V_KCP_MTU=1400
-    V_ADV_TCP_ND=true; V_ADV_TCP_KA=15; V_ADV_TCP_RBUF=4194304; V_ADV_TCP_WBUF=4194304
+    V_ADV_TCP_ND=true; V_ADV_TCP_KA=15; V_ADV_TCP_RBUF=262144; V_ADV_TCP_WBUF=262144
     V_ADV_WS_RBUF=65536; V_ADV_WS_WBUF=65536; V_ADV_WS_COMP=false
-    V_ADV_CLEANUP=3; V_ADV_SESS_TO=60; V_ADV_CONN_TO=30; V_ADV_STREAM_TO=120
-    V_ADV_MAX_CONN=2000; V_ADV_MAX_UDP=1000; V_ADV_UDP_TO=300; V_ADV_UDP_BUF=4194304
-    V_OBF_ON=true; V_OBF_MINP=16; V_OBF_MAXP=512; V_OBF_MIND=0; V_OBF_MAXD=0; V_OBF_BURST=0.15
+    V_ADV_CLEANUP=5; V_ADV_SESS_TO=60; V_ADV_CONN_TO=15; V_ADV_STREAM_TO=60
+    V_ADV_MAX_CONN=600; V_ADV_MAX_UDP=300; V_ADV_UDP_TO=60; V_ADV_UDP_BUF=1048576
+    V_OBF_ON=true; V_OBF_MINP=16; V_OBF_MAXP=256; V_OBF_MIND=0; V_OBF_MAXD=0; V_OBF_BURST=0.15
     V_HTTP_DOM="www.google.com"; V_HTTP_PATH="/search"
     V_HTTP_UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     V_HTTP_CHUNK=false; V_HTTP_COOK=true
-    V_DPI_ON=false; V_DPI_SNI=true; V_DPI_TTL=false; V_DPI_SEG=1200; V_DPI_PACE=2; V_DPI_JITTER=1
-    V_RAW_ON=false; V_RAW_IFACE="eth0"; V_RAW_LIP="0.0.0.0"; V_RAW_LPORT=0
-    V_RAW_GWMAC="00:00:00:00:00:00"; V_RAW_BATCH=32; V_RAW_BUF=2097152; V_RAW_COAL=1
-    V_RAW_MTU=1400; V_RAW_ZC=false; V_RAW_MINTTL=64; V_RAW_MAXTTL=128
-    V_RAW_FRAG=true; V_RAW_FRAGSZ=40; V_RAW_RTTL=true; V_RAW_FAKE=false
-    V_RAW_WSCALE=7; V_RAW_IPPAD=false; V_RAW_DESYNC="split"
     V_LB_STRAT="round_robin"; V_LB_HEALTH=10; V_LB_FAIL_DLY=500; V_LB_MAXFAIL=3; V_LB_RECOV=30; V_LB_STICKY=false
     V_MAX_SESS=0; V_HEARTBEAT=10; V_VERBOSE=false
 }
@@ -294,31 +294,6 @@ edit_advanced() {
     echo -e "${YELLOW}HTTP Mimicry:${NC}"
     read -p "  fake_domain [$V_HTTP_DOM]: " v; V_HTTP_DOM=${v:-$V_HTTP_DOM}
     read -p "  fake_path [$V_HTTP_PATH]: " v; V_HTTP_PATH=${v:-$V_HTTP_PATH}
-    echo -e "${YELLOW}DPI Bypass:${NC}"
-    read -p "  enabled [$V_DPI_ON]: " v; V_DPI_ON=${v:-$V_DPI_ON}
-    read -p "  sni_split [$V_DPI_SNI]: " v; V_DPI_SNI=${v:-$V_DPI_SNI}
-    echo -e "${YELLOW}Raw Socket (DPI Bypass via pcap):${NC}"
-    read -p "  enabled [$V_RAW_ON]: " v; V_RAW_ON=${v:-$V_RAW_ON}
-    if [[ "$V_RAW_ON" == "true" ]]; then
-        local auto_iface=$(ip link show | grep "state UP" | head -1 | awk '{print $2}' | cut -d: -f1)
-        local auto_ip=$(ip -4 addr show "${auto_iface:-eth0}" | grep -oP 'inet \K[\d.]+' | head -1)
-        local auto_gw_ip=$(ip route | grep default | awk '{print $3}' | head -1)
-        local auto_gw_mac=$(ip neigh show "$auto_gw_ip" 2>/dev/null | awk '{print $5}' | head -1)
-        [[ -z "$auto_iface" ]] && auto_iface="eth0"
-        [[ -z "$auto_ip" ]] && auto_ip="0.0.0.0"
-        [[ -z "$auto_gw_mac" ]] && auto_gw_mac="00:00:00:00:00:00"
-        read -p "  interface [$auto_iface]: " v; V_RAW_IFACE=${v:-$auto_iface}
-        read -p "  local_ip [$auto_ip]: " v; V_RAW_LIP=${v:-$auto_ip}
-        read -p "  local_port [$V_RAW_LPORT]: " v; V_RAW_LPORT=${v:-$V_RAW_LPORT}
-        read -p "  gateway_mac [$auto_gw_mac]: " v; V_RAW_GWMAC=${v:-$auto_gw_mac}
-        echo "  Desync methods: split, disorder, fake"
-        read -p "  desync_method [$V_RAW_DESYNC]: " v; V_RAW_DESYNC=${v:-$V_RAW_DESYNC}
-        read -p "  max_packet_size [$V_RAW_MTU]: " v; V_RAW_MTU=${v:-$V_RAW_MTU}
-        read -p "  buffer_size [$V_RAW_BUF]: " v; V_RAW_BUF=${v:-$V_RAW_BUF}
-        read -p "  fragment_first_packet [$V_RAW_FRAG]: " v; V_RAW_FRAG=${v:-$V_RAW_FRAG}
-        read -p "  randomize_ttl [$V_RAW_RTTL]: " v; V_RAW_RTTL=${v:-$V_RAW_RTTL}
-        read -p "  fake_payload [$V_RAW_FAKE]: " v; V_RAW_FAKE=${v:-$V_RAW_FAKE}
-    fi
 }
 
 # ============================================================================
@@ -349,50 +324,7 @@ select_profile() {
 }
 
 # ============================================================================
-# AUTO RAW SOCKET SETUP
-# ============================================================================
-
-auto_setup_raw_socket() {
-    echo ""
-    echo -e "${YELLOW}  Auto-detecting network...${NC}"
-    local iface=$(ip link show | grep "state UP" | head -1 | awk '{print $2}' | cut -d: -f1)
-    [[ -z "$iface" ]] && iface="eth0"
-    local lip=$(ip -4 addr show "$iface" 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
-    [[ -z "$lip" ]] && lip="0.0.0.0"
-    local gw_ip=$(ip route | grep default | awk '{print $3}' | head -1)
-    local gw_mac=""
-    if [[ -n "$gw_ip" ]]; then
-        ping -c 1 -W 1 "$gw_ip" > /dev/null 2>&1
-        gw_mac=$(ip neigh show "$gw_ip" 2>/dev/null | awk '{print $5}' | head -1)
-    fi
-    [[ -z "$gw_mac" || "$gw_mac" == "FAILED" ]] && gw_mac="00:00:00:00:00:00"
-    echo -e "    Interface: ${GREEN}$iface${NC}"
-    echo -e "    Local IP:  ${GREEN}$lip${NC}"
-    echo -e "    Gateway:   ${GREEN}$gw_ip${NC} (${gw_mac})"
-    V_RAW_IFACE="$iface"; V_RAW_LIP="$lip"; V_RAW_GWMAC="$gw_mac"
-    if [[ -n "$FIRST_LISTEN_PORT" ]]; then
-        V_RAW_LPORT=$FIRST_LISTEN_PORT
-    else
-        read -p "    Raw socket port [443]: " rp; V_RAW_LPORT=${rp:-443}
-    fi
-    echo ""
-    echo -e "${YELLOW}  Desync Method:${NC}"
-    echo "    1) split [default]"
-    echo "    2) disorder"
-    echo "    3) fake (TTL=1)"
-    read -p "    Choice [1]: " dm
-    case $dm in 2) V_RAW_DESYNC="disorder" ;; 3) V_RAW_DESYNC="fake"; V_RAW_FAKE=true ;; *) V_RAW_DESYNC="split" ;; esac
-    if [[ "$gw_mac" == "00:00:00:00:00:00" ]]; then
-        echo ""
-        echo -e "${YELLOW}  Warning: Gateway MAC not detected.${NC}"
-        echo -e "  Run: ${GREEN}ip neigh show${NC} to find it manually."
-        read -p "    Enter gateway MAC [00:00:00:00:00:00]: " manual_mac
-        [[ -n "$manual_mac" ]] && V_RAW_GWMAC="$manual_mac"
-    fi
-}
-
-# ============================================================================
-# SHARED CONFIG (smux, kcp, advanced, etc.)
+# SHARED CONFIG (smux, kcp, advanced, obfuscation, http_mimic)
 # ============================================================================
 
 write_shared_config() {
@@ -449,35 +381,6 @@ http_mimic:
   custom_headers:
     - "Accept-Language: en-US,en;q=0.9"
     - "Accept-Encoding: gzip, deflate, br"
-
-light_dpi_bypass:
-  enabled: ${V_DPI_ON}
-  sni_split: ${V_DPI_SNI}
-  ttl_manipulation: ${V_DPI_TTL}
-  segment_size: ${V_DPI_SEG}
-  pacing_delay_ms: ${V_DPI_PACE}
-  jitter_range_ms: ${V_DPI_JITTER}
-
-raw_socket:
-  enabled: ${V_RAW_ON}
-  interface: "${V_RAW_IFACE}"
-  local_ip: "${V_RAW_LIP}"
-  local_port: ${V_RAW_LPORT}
-  gateway_mac: "${V_RAW_GWMAC}"
-  batch_size: ${V_RAW_BATCH}
-  buffer_size: ${V_RAW_BUF}
-  coalesce_ms: ${V_RAW_COAL}
-  max_packet_size: ${V_RAW_MTU}
-  use_zero_copy: ${V_RAW_ZC}
-  min_ttl: ${V_RAW_MINTTL}
-  max_ttl: ${V_RAW_MAXTTL}
-  fragment_first_packet: ${V_RAW_FRAG}
-  fragment_size: ${V_RAW_FRAGSZ}
-  randomize_ttl: ${V_RAW_RTTL}
-  fake_payload: ${V_RAW_FAKE}
-  tcp_window_scale: ${V_RAW_WSCALE}
-  ip_options_padding: ${V_RAW_IPPAD}
-  desync_method: "${V_RAW_DESYNC}"
 YAML
 }
 
@@ -545,7 +448,7 @@ write_server_yaml() {
 mode: server
 psk: "${V_PSK}"
 profile: "${V_PROFILE}"
-verbose: true
+verbose: false
 max_sessions: ${V_MAX_SESS}
 heartbeat: ${V_HEARTBEAT}
 
@@ -562,7 +465,7 @@ write_client_yaml() {
 mode: client
 psk: "${V_PSK}"
 profile: "${V_PROFILE}"
-verbose: true
+verbose: false
 heartbeat: ${V_HEARTBEAT}
 
 ${V_PATHS_BLOCK}
@@ -631,20 +534,6 @@ install_server() {
             done <<< "$(echo -e "$MAPPINGS")"
             LISTENER_COUNT=1
             ;;
-    esac
-
-    echo ""
-    echo -e "${CYAN}━━━ DPI Bypass ━━━${NC}"
-    echo "  1) Off (default)"
-    echo "  2) Light DPI Bypass (SNI split)"
-    echo "  3) Raw Socket (pcap desync - needs root)"
-    echo "  4) Both"
-    read -p "  Choice [1]: " dpi_choice
-    case $dpi_choice in
-        2) V_DPI_ON=true; V_DPI_SNI=true; echo -e "${GREEN}  Light DPI enabled${NC}" ;;
-        3) V_RAW_ON=true; auto_setup_raw_socket; echo -e "${GREEN}  Raw Socket enabled (${V_RAW_DESYNC})${NC}" ;;
-        4) V_DPI_ON=true; V_DPI_SNI=true; V_RAW_ON=true; auto_setup_raw_socket; echo -e "${GREEN}  Both enabled${NC}" ;;
-        *) echo -e "  DPI Bypass: off" ;;
     esac
 
     if [[ "$inst_mode" == "3" ]]; then
