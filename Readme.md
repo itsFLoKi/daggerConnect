@@ -4,7 +4,7 @@
 
 **ریورس تانل حرفه‌ای با Traffic Obfuscation**
 
-[![خرید لایسنس](https://img.shields.io/badge/خرید_لایسنس-@DaggerConnectBot-blue.svg)](https://t.me/DaggerConnectBot)
+[![buyLICENSE](https://img.shields.io/badge/خرید_لایسنس-@DaggerConnectBot-blue.svg)](https://t.me/DaggerConnectBot)
 [![Version](https://img.shields.io/badge/version-1.3.3-blue.svg)](https://github.com/itsFLoKi/DaggerConnect/releases)
 [![Go](https://img.shields.io/badge/Go-1.21+-00ADD8.svg)](https://golang.org)
 [![Telegram](https://img.shields.io/badge/Telegram-@DaggerConnect-blue.svg)](https://t.me/DaggerConnect)
@@ -851,7 +851,7 @@ verbose: true
 ## 📞 پشتیبانی
 
 - 📱 **Telegram Channel**: [@DaggerConnect](https://t.me/DaggerConnect)
-- 🤖 **خرید لایسنس**: [@DaggerConnectBot](https://t.me/DaggerConnectBot)
+- 🤖 **buyLICENSE**: [@DaggerConnectBot](https://t.me/DaggerConnectBot)
 - 🐛 **گزارش باگ**: [GitHub Issues](https://github.com/itsFLoKi/DaggerConnect/issues)
 
 ---
