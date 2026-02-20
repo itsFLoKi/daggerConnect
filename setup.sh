@@ -180,15 +180,15 @@ system_optimizer_menu() {
 # HELPER: Select Transport
 # ============================================================================
 select_transport() {
-    echo ""
-    echo -e "${YELLOW}Select Transport:${NC}"
-    echo "  1) httpsmux  - HTTPS Mimicry (Recommended)"
-    echo "  2) httpmux   - HTTP Mimicry"
-    echo "  3) wssmux    - WebSocket Secure"
-    echo "  4) wsmux     - WebSocket"
-    echo "  5) kcpmux    - KCP (UDP)"
-    echo "  6) tcpmux    - Simple TCP"
-    read -p "Choice [1-6]: " trans_choice
+    echo "" >&2
+    echo -e "${YELLOW}Select Transport:${NC}" >&2
+    echo "  1) httpsmux  - HTTPS Mimicry (Recommended)" >&2
+    echo "  2) httpmux   - HTTP Mimicry" >&2
+    echo "  3) wssmux    - WebSocket Secure" >&2
+    echo "  4) wsmux     - WebSocket" >&2
+    echo "  5) kcpmux    - KCP (UDP)" >&2
+    echo "  6) tcpmux    - Simple TCP" >&2
+    read -p "Choice [1-6]: " trans_choice >&2
     case $trans_choice in
         1) echo "httpsmux" ;;
         2) echo "httpmux" ;;
@@ -218,17 +218,17 @@ configure_tun() {
     TUN_NAME=${TUN_NAME:-$DEFAULT_NAME}
 
     if [ "$SIDE" == "server" ]; then
-        echo -e "${YELLOW}Example: local=10.10.${IDX}.1  peer=10.10.${IDX}.2${NC}"
-        read -p "Local IP (server) [10.10.${IDX}.1]: " TUN_LOCAL
-        TUN_LOCAL=${TUN_LOCAL:-"10.10.${IDX}.1"}
-        read -p "Peer IP  (client) [10.10.${IDX}.2]: " TUN_PEER
-        TUN_PEER=${TUN_PEER:-"10.10.${IDX}.2"}
+        echo -e "${YELLOW}Example: local=20.40.${IDX}.1  peer=20.40.${IDX}.2${NC}"
+        read -p "Local IP (server) [20.40.${IDX}.1]: " TUN_LOCAL
+        TUN_LOCAL=${TUN_LOCAL:-"20.40.${IDX}.1"}
+        read -p "Peer IP  (client) [20.40.${IDX}.2]: " TUN_PEER
+        TUN_PEER=${TUN_PEER:-"20.40.${IDX}.2"}
     else
-        echo -e "${YELLOW}Example: local=10.10.${IDX}.2  peer=10.10.${IDX}.1${NC}"
-        read -p "Local IP (client) [10.10.${IDX}.2]: " TUN_LOCAL
-        TUN_LOCAL=${TUN_LOCAL:-"10.10.${IDX}.2"}
-        read -p "Peer IP  (server) [10.10.${IDX}.1]: " TUN_PEER
-        TUN_PEER=${TUN_PEER:-"10.10.${IDX}.1"}
+        echo -e "${YELLOW}Example: local=20.40.${IDX}.2  peer=20.40.${IDX}.1${NC}"
+        read -p "Local IP (client) [20.40.${IDX}.2]: " TUN_LOCAL
+        TUN_LOCAL=${TUN_LOCAL:-"20.40.${IDX}.2"}
+        read -p "Peer IP  (server) [20.40.${IDX}.1]: " TUN_PEER
+        TUN_PEER=${TUN_PEER:-"20.40.${IDX}.1"}
     fi
 
     read -p "MTU [1400]: " TUN_MTU
