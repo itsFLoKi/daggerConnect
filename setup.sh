@@ -58,8 +58,8 @@ download_binary() {
     mkdir -p "$INSTALL_DIR"
     LATEST_VERSION=$(curl -s "$LATEST_RELEASE_API" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     if [ -z "$LATEST_VERSION" ]; then
-        echo -e "${YELLOW}Could not fetch latest version, using v1.3.3${NC}"
-        LATEST_VERSION="v1.3.3"
+        echo -e "${YELLOW}Could not fetch latest version, using v1.3.4${NC}"
+        LATEST_VERSION="v1.3.4"
     fi
     BINARY_URL="https://github.com/itsFLoKi/DaggerConnect/releases/download/${LATEST_VERSION}/DaggerConnect"
     echo -e "${CYAN}Latest version: ${GREEN}${LATEST_VERSION}${NC}"
@@ -188,7 +188,8 @@ select_transport() {
     echo "  4) wsmux     - WebSocket" >&2
     echo "  5) kcpmux    - KCP (UDP)" >&2
     echo "  6) tcpmux    - Simple TCP" >&2
-    read -p "Choice [1-6]: " trans_choice >&2
+    echo "  7) rawmux    - Raw TCP (Low Overhead)" >&2
+    read -p "Choice [1-7]: " trans_choice >&2
     case $trans_choice in
         1) echo "httpsmux" ;;
         2) echo "httpmux" ;;
@@ -196,6 +197,7 @@ select_transport() {
         4) echo "wsmux" ;;
         5) echo "kcpmux" ;;
         6) echo "tcpmux" ;;
+        7) echo "rawmux" ;;
         *) echo "httpsmux" ;;
     esac
 }
@@ -238,6 +240,46 @@ configure_tun() {
     _TUN_LOCAL="$TUN_LOCAL"
     _TUN_PEER="$TUN_PEER"
     _TUN_MTU="$TUN_MTU"
+}
+
+# ============================================================================
+# HELPER: Configure rawmux options
+# ============================================================================
+configure_rawmux() {
+    echo ""
+    echo -e "${CYAN}─── rawmux Configuration ───${NC}"
+    read -p "Handshake timeout (seconds) [10]: " RAW_HANDSHAKE
+    RAW_HANDSHAKE=${RAW_HANDSHAKE:-10}
+    read -p "Keepalive (seconds) [15]: " RAW_KEEPALIVE
+    RAW_KEEPALIVE=${RAW_KEEPALIVE:-15}
+    read -p "Read buffer [4194304]: " RAW_READ_BUF
+    RAW_READ_BUF=${RAW_READ_BUF:-4194304}
+    read -p "Write buffer [4194304]: " RAW_WRITE_BUF
+    RAW_WRITE_BUF=${RAW_WRITE_BUF:-4194304}
+    read -p "Use pcap? [Y/n]: " RAW_PCAP
+    [[ $RAW_PCAP =~ ^[Nn]$ ]] && RAW_USE_PCAP="false" || RAW_USE_PCAP="true"
+
+    _RAW_HANDSHAKE="$RAW_HANDSHAKE"
+    _RAW_KEEPALIVE="$RAW_KEEPALIVE"
+    _RAW_READ_BUF="$RAW_READ_BUF"
+    _RAW_WRITE_BUF="$RAW_WRITE_BUF"
+    _RAW_USE_PCAP="$RAW_USE_PCAP"
+}
+
+# ============================================================================
+# HELPER: Write rawmux block to config file
+# ============================================================================
+write_rawmux_config() {
+    local FILE=$1
+    cat >> "$FILE" << EOF
+
+rawmux:
+  handshake_timeout: ${_RAW_HANDSHAKE}
+  keepalive: ${_RAW_KEEPALIVE}
+  read_buffer: ${_RAW_READ_BUF}
+  write_buffer: ${_RAW_WRITE_BUF}
+  use_pcap: ${_RAW_USE_PCAP}
+EOF
 }
 
 # ============================================================================
@@ -354,6 +396,8 @@ build_port_mappings() {
 # ============================================================================
 write_common_tail() {
     local FILE=$1
+    local TRANSPORT=${2:-""}
+
     cat >> "$FILE" << 'EOF'
 
 smux:
@@ -407,6 +451,11 @@ http_mimic:
     - "Accept-Language: en-US,en;q=0.9"
     - "Accept-Encoding: gzip, deflate, br"
 EOF
+
+    # Add rawmux block if transport is rawmux
+    if [ "$TRANSPORT" == "rawmux" ]; then
+        write_rawmux_config "$FILE"
+    fi
 }
 
 # ============================================================================
@@ -441,6 +490,11 @@ install_server_automatic() {
 
     TRANSPORT=$(select_transport)
 
+    # Configure rawmux if selected
+    if [ "$TRANSPORT" == "rawmux" ]; then
+        configure_rawmux
+    fi
+
     build_port_mappings
     AUTO_MAPPINGS="$MAPPINGS"
 
@@ -471,7 +525,7 @@ install_server_automatic() {
         printf '%b' "$AUTO_MAPPINGS" | sed 's/^/    /'
     } > "$CONFIG_FILE"
 
-    write_common_tail "$CONFIG_FILE"
+    write_common_tail "$CONFIG_FILE" "$TRANSPORT"
     create_systemd_service "server"
 
     read -p "Optimize system? [Y/n]: " opt
@@ -532,6 +586,8 @@ install_server_multilistener() {
     } > "$CONFIG_FILE"
 
     LISTENER_COUNT=0
+    HAS_RAWMUX=false
+
     while true; do
         echo ""
         echo -e "${PURPLE}══ LISTENER #${LISTENER_COUNT} ══${NC}"
@@ -540,6 +596,17 @@ install_server_multilistener() {
         L_ADDR=${L_ADDR:-"0.0.0.0:$((4000+LISTENER_COUNT))"}
 
         L_TRANSPORT=$(select_transport)
+
+        # Track if rawmux is used and collect its settings
+        if [ "$L_TRANSPORT" == "rawmux" ]; then
+            HAS_RAWMUX=true
+            configure_rawmux
+            L_RAW_HANDSHAKE="$_RAW_HANDSHAKE"
+            L_RAW_KEEPALIVE="$_RAW_KEEPALIVE"
+            L_RAW_READ_BUF="$_RAW_READ_BUF"
+            L_RAW_WRITE_BUF="$_RAW_WRITE_BUF"
+            L_RAW_USE_PCAP="$_RAW_USE_PCAP"
+        fi
 
         # Per-listener cert
         L_CERT=""; L_KEY=""
@@ -595,7 +662,20 @@ install_server_multilistener() {
         [[ ! $ML =~ ^[Yy]$ ]] && break
     done
 
+    # Write common tail; if rawmux was used, append rawmux block
     write_common_tail "$CONFIG_FILE"
+    if $HAS_RAWMUX; then
+        cat >> "$CONFIG_FILE" << EOF
+
+rawmux:
+  handshake_timeout: ${L_RAW_HANDSHAKE}
+  keepalive: ${L_RAW_KEEPALIVE}
+  read_buffer: ${L_RAW_READ_BUF}
+  write_buffer: ${L_RAW_WRITE_BUF}
+  use_pcap: ${L_RAW_USE_PCAP}
+EOF
+    fi
+
     create_systemd_service "server"
 
     read -p "Optimize system? [Y/n]: " opt
@@ -646,6 +726,11 @@ install_client_automatic() {
 
     TRANSPORT=$(select_transport)
 
+    # Configure rawmux if selected
+    if [ "$TRANSPORT" == "rawmux" ]; then
+        configure_rawmux
+    fi
+
     read -p "Server address:port (e.g., 1.2.3.4:2020): " ADDR
     if [ -z "$ADDR" ]; then
         echo -e "${RED}Address cannot be empty!${NC}"
@@ -671,7 +756,7 @@ paths:
     dial_timeout: 5
 EOF
 
-    write_common_tail "$CONFIG_FILE"
+    write_common_tail "$CONFIG_FILE" "$TRANSPORT"
     create_systemd_service "client"
 
     read -p "Optimize system? [Y/n]: " opt
@@ -730,11 +815,24 @@ install_client_multipaths() {
     } > "$CONFIG_FILE"
 
     PATH_COUNT=0
+    HAS_RAWMUX=false
+
     while true; do
         echo ""
         echo -e "${PURPLE}══ PATH #${PATH_COUNT} ══${NC}"
 
         P_TRANSPORT=$(select_transport)
+
+        # Configure rawmux if selected
+        if [ "$P_TRANSPORT" == "rawmux" ]; then
+            HAS_RAWMUX=true
+            configure_rawmux
+            P_RAW_HANDSHAKE="$_RAW_HANDSHAKE"
+            P_RAW_KEEPALIVE="$_RAW_KEEPALIVE"
+            P_RAW_READ_BUF="$_RAW_READ_BUF"
+            P_RAW_WRITE_BUF="$_RAW_WRITE_BUF"
+            P_RAW_USE_PCAP="$_RAW_USE_PCAP"
+        fi
 
         read -p "Server address:port: " P_ADDR
         [ -z "$P_ADDR" ] && echo -e "${RED}Cannot be empty!${NC}" && continue
@@ -844,6 +942,19 @@ http_mimic:
     - "Accept-Language: en-US,en;q=0.9"
     - "Accept-Encoding: gzip, deflate, br"
 EOF
+
+    # Append rawmux block if any path used rawmux
+    if $HAS_RAWMUX; then
+        cat >> "$CONFIG_FILE" << EOF
+
+rawmux:
+  handshake_timeout: ${P_RAW_HANDSHAKE}
+  keepalive: ${P_RAW_KEEPALIVE}
+  read_buffer: ${P_RAW_READ_BUF}
+  write_buffer: ${P_RAW_WRITE_BUF}
+  use_pcap: ${P_RAW_USE_PCAP}
+EOF
+    fi
 
     create_systemd_service "client"
 
