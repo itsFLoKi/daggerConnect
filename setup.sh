@@ -13,7 +13,7 @@ CONFIG_DIR="/etc/DaggerConnect"
 SYSTEMD_DIR="/etc/systemd/system"
 LATEST_RELEASE_API="https://api.github.com/repos/itsFLoKi/DaggerConnect/releases/latest"
 
-# ── Global state vars (init to avoid unbound errors with set -u) ─────────────
+# ── Global state vars ────────────────────────────────────────────────────────
 _TUN_NAME=""; _TUN_LOCAL=""; _TUN_PEER=""; _TUN_MTU="1400"
 _RM_HS_TIMEOUT="10"; _RM_KEEPALIVE="15"; _RM_RBUF="4194304"
 _RM_WBUF="4194304"; _RM_USE_PCAP="false"
@@ -160,11 +160,12 @@ optimize_system() {
         warn "BBR not available — using CUBIC."
     fi
 
+    # FIX: tc may fail on containers/OpenVZ — catch it gracefully
     tc qdisc del dev "$INTERFACE" root 2>/dev/null || true
     if tc qdisc add dev "$INTERFACE" root fq_codel limit 500 target 3ms interval 50ms quantum 300 ecn 2>/dev/null; then
         ok "fq_codel qdisc configured."
     else
-        warn "qdisc configuration skipped."
+        warn "qdisc configuration skipped (container/VPS may not support tc)."
     fi
 
     cat > /etc/sysctl.d/99-daggerconnect.conf << 'EOF'
@@ -436,14 +437,13 @@ configure_tun() {
 
 # ============================================================================
 # PORT VALIDATION HELPER
-# FIX: Centralized port validation to avoid repetition
 # ============================================================================
 
 _validate_port() {
     local P=$1
     local LABEL=${2:-"Port"}
     if ! [[ "$P" =~ ^[0-9]+$ ]] || [[ "$P" -lt 1 || "$P" -gt 65535 ]]; then
-        err "${LABEL} '${P}' is invalid (must be 1–65535)."
+        err "${LABEL} '${P}' is invalid (must be 1-65535)."
         return 1
     fi
     return 0
@@ -453,8 +453,6 @@ _validate_port() {
 # HELPER: BUILD PORT MAPPINGS
 # ============================================================================
 
-# _do_add_mapping relies on BIND_IP, PROTO, COUNT, MAPPINGS from calling scope
-# (bash dynamic scoping — these are NOT subshells, so local vars are accessible)
 _do_add_mapping() {
     local BIND_P=$1
     local TARGET_ADDR=$2
@@ -481,7 +479,7 @@ build_port_mappings() {
 
     while true; do
         echo ""
-        echo -e "  ${YELLOW}── Mapping #$((COUNT+1)) ──${NC}"
+        echo -e "  ${YELLOW}-- Mapping #$((COUNT+1)) --${NC}"
         echo -e "  Protocol: ${WHITE}1)${NC}tcp  ${WHITE}2)${NC}udp  ${WHITE}3)${NC}both"
         read -rp "  Choice [1]: " proto_choice || true
         case $proto_choice in
@@ -494,11 +492,10 @@ build_port_mappings() {
         [[ -z "$PORT_INPUT" ]] && err "Cannot be empty!" && continue
         PORT_INPUT=$(echo "$PORT_INPUT" | tr -d ' ')
 
-        # ── Pattern: range with custom IP — 5000/5010=1.2.3.4:8000/8010 ──────
+        # Pattern: range with custom IP — 5000/5010=1.2.3.4:8000/8010
         if [[ "$PORT_INPUT" =~ ^([0-9]+)/([0-9]+)=([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)/([0-9]+)$ ]]; then
             local BS="${BASH_REMATCH[1]}" BE="${BASH_REMATCH[2]}"
             local CTIP="${BASH_REMATCH[3]}" TS="${BASH_REMATCH[4]}" TE="${BASH_REMATCH[5]}"
-            # FIX #1: validate all four port boundaries
             local _valid=true
             _validate_port "$BS" "Bind start" || _valid=false
             _validate_port "$BE" "Bind end"   || _valid=false
@@ -510,13 +507,12 @@ build_port_mappings() {
             if [[ "$BS" -gt "$BE" ]]; then err "Bind start > end!"; continue; fi
             local _total_entries; [[ "$PROTO" == "both" ]] && _total_entries=$((BR*2)) || _total_entries=$BR
             for ((i=0; i<BR; i++)); do _do_add_mapping $((BS+i)) "${CTIP}:$((TS+i))"; done
-            ok "Added: ${BS}-${BE} → ${CTIP}:${TS}-${TE} (${PROTO}, ${_total_entries} entries)"
+            ok "Added: ${BS}-${BE} -> ${CTIP}:${TS}-${TE} (${PROTO}, ${_total_entries} entries)"
 
-        # ── Pattern: range mapping — 1000/1010=2000/2010 ─────────────────────
+        # Pattern: range mapping — 1000/1010=2000/2010
         elif [[ "$PORT_INPUT" =~ ^([0-9]+)/([0-9]+)=([0-9]+)/([0-9]+)$ ]]; then
             local BS="${BASH_REMATCH[1]}" BE="${BASH_REMATCH[2]}"
             local TS="${BASH_REMATCH[3]}" TE="${BASH_REMATCH[4]}"
-            # FIX #2: validate all four port boundaries
             local _valid=true
             _validate_port "$BS" "Bind start" || _valid=false
             _validate_port "$BE" "Bind end"   || _valid=false
@@ -528,12 +524,11 @@ build_port_mappings() {
             if [[ "$BS" -gt "$BE" ]]; then err "Bind start > end!"; continue; fi
             local _total_entries; [[ "$PROTO" == "both" ]] && _total_entries=$((BR*2)) || _total_entries=$BR
             for ((i=0; i<BR; i++)); do _do_add_mapping $((BS+i)) "${TARGET_IP}:$((TS+i))"; done
-            ok "Added: ${BS}-${BE} → ${TS}-${TE} (${BR} ports, ${PROTO}, ${_total_entries} entries)"
+            ok "Added: ${BS}-${BE} -> ${TS}-${TE} (${BR} ports, ${PROTO}, ${_total_entries} entries)"
 
-        # ── Pattern: simple range — 1000/2000 ────────────────────────────────
+        # Pattern: simple range — 1000/2000
         elif [[ "$PORT_INPUT" =~ ^([0-9]+)/([0-9]+)$ ]]; then
             local SP="${BASH_REMATCH[1]}" EP="${BASH_REMATCH[2]}"
-            # FIX #3: validate both endpoints are in valid port range
             local _valid=true
             _validate_port "$SP" "Start port" || _valid=false
             _validate_port "$EP" "End port"   || _valid=false
@@ -548,34 +543,31 @@ build_port_mappings() {
             for ((port=SP; port<=EP; port++)); do _do_add_mapping "$port" "${TARGET_IP}:${port}"; done
             ok "Added: ${SP}-${EP} (${RS} ports, ${PROTO}, ${_total_entries} entries)"
 
-        # ── Pattern: custom IP single — 5000=1.2.3.4:8080 ───────────────────
+        # Pattern: custom IP single — 5000=1.2.3.4:8080
         elif [[ "$PORT_INPUT" =~ ^([0-9]+)=([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)$ ]]; then
             local BPORT="${BASH_REMATCH[1]}" CTIP="${BASH_REMATCH[2]}" TPORT="${BASH_REMATCH[3]}"
-            # FIX #4: validate both bind and target ports
             local _valid=true
             _validate_port "$BPORT" "Bind port"   || _valid=false
             _validate_port "$TPORT" "Target port" || _valid=false
             [[ "$_valid" == "false" ]] && continue
             _do_add_mapping "${BPORT}" "${CTIP}:${TPORT}"
-            ok "Added: ${BPORT} → ${CTIP}:${TPORT} (${PROTO})"
+            ok "Added: ${BPORT} -> ${CTIP}:${TPORT} (${PROTO})"
 
-        # ── Pattern: custom map — 5000=8080 ──────────────────────────────────
+        # Pattern: custom map — 5000=8080
         elif [[ "$PORT_INPUT" =~ ^([0-9]+)=([0-9]+)$ ]]; then
             local BPORT="${BASH_REMATCH[1]}" TPORT="${BASH_REMATCH[2]}"
-            # FIX #5: validate both bind and target ports
             local _valid=true
             _validate_port "$BPORT" "Bind port"   || _valid=false
             _validate_port "$TPORT" "Target port" || _valid=false
             [[ "$_valid" == "false" ]] && continue
             _do_add_mapping "${BPORT}" "${TARGET_IP}:${TPORT}"
-            ok "Added: ${BPORT} → ${TPORT} (${PROTO})"
+            ok "Added: ${BPORT} -> ${TPORT} (${PROTO})"
 
-        # ── Pattern: single port — 8080 ───────────────────────────────────────
+        # Pattern: single port — 8080
         elif [[ "$PORT_INPUT" =~ ^[0-9]+$ ]]; then
-            # FIX #6: use _validate_port instead of inline check for consistency
             if ! _validate_port "$PORT_INPUT" "Port"; then continue; fi
             _do_add_mapping "$PORT_INPUT" "${TARGET_IP}:${PORT_INPUT}"
-            ok "Added: ${PORT_INPUT} → ${PORT_INPUT} (${PROTO})"
+            ok "Added: ${PORT_INPUT} -> ${PORT_INPUT} (${PROTO})"
 
         else
             err "Invalid format!"; continue
@@ -586,7 +578,7 @@ build_port_mappings() {
     done
 
     if [[ "$COUNT" -eq 0 ]]; then
-        warn "No mappings defined — using default 8080→8080."
+        warn "No mappings defined — using default 8080->8080."
         MAPPINGS="  - type: tcp\n    bind: \"0.0.0.0:8080\"\n    target: \"127.0.0.1:8080\"\n"
     fi
 }
@@ -654,21 +646,45 @@ EOF
 
 # ============================================================================
 # SSL CERT HELPER
+# FIX 1: Sanitize domain input to prevent openssl -subj injection/failure
+# FIX 2: Clean up partial files on failure
+# FIX 3: Return proper exit code so callers can check success
 # ============================================================================
 
 gen_ssl_cert() {
-    local CERT_OUT=$1; local KEY_OUT=$2; local DOMAIN=$3
+    local CERT_OUT=$1
+    local KEY_OUT=$2
+    local DOMAIN=$3
+
+    # Sanitize domain — strip chars that break openssl -subj
+    DOMAIN=$(echo "$DOMAIN" | tr -cd 'a-zA-Z0-9._-')
+    [[ -z "$DOMAIN" ]] && DOMAIN="www.google.com"
+
     mkdir -p "$(dirname "$CERT_OUT")"
-    if openssl req -x509 -newkey rsa:4096 -keyout "$KEY_OUT" -out "$CERT_OUT" \
-        -days 365 -nodes -subj "/C=US/O=MyCompany/CN=${DOMAIN}" 2>/dev/null; then
-        ok "SSL certificate generated."
+
+    # Remove any stale partial files before attempting
+    rm -f "$CERT_OUT" "$KEY_OUT"
+
+    if openssl req -x509 -newkey rsa:4096 \
+        -keyout "$KEY_OUT" \
+        -out "$CERT_OUT" \
+        -days 365 -nodes \
+        -subj "/C=US/O=MyCompany/CN=${DOMAIN}" 2>/dev/null; then
+        ok "SSL certificate generated for: ${DOMAIN}"
+        return 0
     else
         err "SSL certificate generation failed."
+        # Clean up broken partial files
+        rm -f "$CERT_OUT" "$KEY_OUT"
+        return 1
     fi
 }
 
 # ============================================================================
 # SYSTEMD SERVICE
+# FIX: systemctl daemon-reload must not exit the script on failure
+# FIX: Added mkdir -p for SYSTEMD_DIR
+# FIX: Added Wants=network-online.target for better startup ordering
 # ============================================================================
 
 create_systemd_service() {
@@ -676,10 +692,14 @@ create_systemd_service() {
     local MODE_CAP
     MODE_CAP="$(echo "${MODE:0:1}" | tr '[:lower:]' '[:upper:]')${MODE:1}"
 
+    # Ensure systemd directory exists (some minimal installs may not have it)
+    mkdir -p "$SYSTEMD_DIR"
+
     cat > "$SYSTEMD_DIR/DaggerConnect-${MODE}.service" << EOF
 [Unit]
 Description=DaggerConnect Reverse Tunnel — ${MODE_CAP}
-After=network.target
+After=network.target network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -695,12 +715,16 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload
+
+    # FIX: daemon-reload failure (e.g. in containers) must NOT kill the script
+    if ! systemctl daemon-reload 2>/dev/null; then
+        warn "systemctl daemon-reload failed — this may happen in containers. Continuing."
+    fi
     ok "Systemd service created: DaggerConnect-${MODE}"
 }
 
 # ============================================================================
-# _write_transport_extras — writes rawmux/daggermux blocks if needed
+# _write_transport_extras
 # ============================================================================
 
 _write_transport_extras() {
@@ -713,24 +737,45 @@ _write_transport_extras() {
 
 # ============================================================================
 # HELPER: SAFE SERVICE START+ENABLE
+# FIX: Verify service file exists before starting
 # ============================================================================
 
 safe_start_enable() {
     local SERVICE=$1
-    systemctl start  "$SERVICE" 2>/dev/null || warn "Service start failed — check config and logs."
+    if [[ ! -f "$SYSTEMD_DIR/${SERVICE}.service" ]]; then
+        err "Service file not found: $SYSTEMD_DIR/${SERVICE}.service"
+        warn "Config was saved. You can start manually: systemctl start ${SERVICE}"
+        return 1
+    fi
+    systemctl start  "$SERVICE" 2>/dev/null || warn "Service start failed — check logs: journalctl -u ${SERVICE} -n 50"
     systemctl enable "$SERVICE" 2>/dev/null || warn "Service enable failed."
 }
 
 # ============================================================================
 # PORT CONFLICT CHECK
+# FIX: Fallback to netstat if ss is unavailable
 # ============================================================================
 
 check_port_available() {
     local PORT=$1
-    if ss -tlnp 2>/dev/null | grep -q ":${PORT} " || \
-       ss -ulnp 2>/dev/null | grep -q ":${PORT} "; then
-        local OWNER
-        OWNER=$(ss -tlnp 2>/dev/null | grep ":${PORT} " | awk '{print $NF}' | head -1)
+    local IN_USE=false
+
+    if command -v ss &>/dev/null; then
+        if ss -tlnp 2>/dev/null | grep -q ":${PORT} " || \
+           ss -ulnp 2>/dev/null | grep -q ":${PORT} "; then
+            IN_USE=true
+        fi
+    elif command -v netstat &>/dev/null; then
+        if netstat -tlnp 2>/dev/null | grep -q ":${PORT} " || \
+           netstat -ulnp 2>/dev/null | grep -q ":${PORT} "; then
+            IN_USE=true
+        fi
+    fi
+
+    if $IN_USE; then
+        local OWNER=""
+        command -v ss &>/dev/null && \
+            OWNER=$(ss -tlnp 2>/dev/null | grep ":${PORT} " | awk '{print $NF}' | head -1)
         warn "Port ${PORT} is already in use! (${OWNER:-unknown process})"
         return 1
     fi
@@ -770,11 +815,20 @@ install_server_automatic() {
     build_port_mappings
     AUTO_MAPPINGS="$MAPPINGS"
 
+    # FIX: Check cert generation result before using cert paths
     CERT_FILE=""; KEY_FILE=""
     if [[ "$TRANSPORT" == "httpsmux" || "$TRANSPORT" == "wssmux" ]]; then
         read -rp "  Domain for SSL cert [www.google.com]: " CD || true; CD=${CD:-www.google.com}
-        gen_ssl_cert "$CONFIG_DIR/certs/cert.pem" "$CONFIG_DIR/certs/key.pem" "$CD"
-        CERT_FILE="$CONFIG_DIR/certs/cert.pem"; KEY_FILE="$CONFIG_DIR/certs/key.pem"
+        if gen_ssl_cert "$CONFIG_DIR/certs/cert.pem" "$CONFIG_DIR/certs/key.pem" "$CD"; then
+            CERT_FILE="$CONFIG_DIR/certs/cert.pem"
+            KEY_FILE="$CONFIG_DIR/certs/key.pem"
+        else
+            warn "SSL cert generation failed. Continuing WITHOUT TLS."
+            read -rp "  Continue without SSL? [y/N]: " nosslok || true
+            if [[ ! $nosslok =~ ^[Yy]$ ]]; then
+                install_server_automatic; return
+            fi
+        fi
     fi
 
     [[ "$TRANSPORT" == "daggermux" ]] && configure_daggermux "server" && setup_daggermux_iptables "$LISTEN_PORT"
@@ -790,7 +844,8 @@ install_server_automatic() {
         echo "verbose: true"
         echo "heartbeat: 2"
         echo ""
-        if [[ -n "$CERT_FILE" ]]; then
+        # FIX: Only write cert config if files actually exist on disk
+        if [[ -n "$CERT_FILE" && -f "$CERT_FILE" && -n "$KEY_FILE" && -f "$KEY_FILE" ]]; then
             echo "cert_file: \"${CERT_FILE}\""
             echo "key_file: \"${KEY_FILE}\""
             echo ""
@@ -798,7 +853,7 @@ install_server_automatic() {
         echo "listeners:"
         echo "  - addr: \"0.0.0.0:${LISTEN_PORT}\""
         echo "    transport: \"${TRANSPORT}\""
-        if [[ -n "$CERT_FILE" ]]; then
+        if [[ -n "$CERT_FILE" && -f "$CERT_FILE" && -n "$KEY_FILE" && -f "$KEY_FILE" ]]; then
             echo "    cert_file: \"${CERT_FILE}\""
             echo "    key_file: \"${KEY_FILE}\""
         fi
@@ -856,8 +911,12 @@ install_server_multilistener() {
     read -rp "  Generate global SSL cert? [y/N]: " GC || true
     if [[ $GC =~ ^[Yy]$ ]]; then
         read -rp "  Domain [www.google.com]: " CD || true; CD=${CD:-www.google.com}
-        gen_ssl_cert "$CONFIG_DIR/certs/cert.pem" "$CONFIG_DIR/certs/key.pem" "$CD"
-        GLOBAL_CERT="$CONFIG_DIR/certs/cert.pem"; GLOBAL_KEY="$CONFIG_DIR/certs/key.pem"
+        if gen_ssl_cert "$CONFIG_DIR/certs/cert.pem" "$CONFIG_DIR/certs/key.pem" "$CD"; then
+            GLOBAL_CERT="$CONFIG_DIR/certs/cert.pem"
+            GLOBAL_KEY="$CONFIG_DIR/certs/key.pem"
+        else
+            warn "Global SSL cert failed — listeners needing TLS will prompt individually."
+        fi
     fi
 
     CONFIG_FILE="$CONFIG_DIR/server.yaml"
@@ -870,7 +929,7 @@ install_server_multilistener() {
         echo "verbose: ${VERBOSE}"
         echo "heartbeat: ${HB}"
         echo ""
-        if [[ -n "$GLOBAL_CERT" ]]; then
+        if [[ -n "$GLOBAL_CERT" && -f "$GLOBAL_CERT" ]]; then
             echo "cert_file: \"${GLOBAL_CERT}\""
             echo "key_file: \"${GLOBAL_KEY}\""
             echo ""
@@ -882,7 +941,7 @@ install_server_multilistener() {
     local HAS_DAGGERMUX=false HAS_RAWMUX=false
 
     while true; do
-        echo ""; echo -e "  ${PURPLE}══ Listener #${LISTENER_COUNT} ══${NC}"
+        echo ""; echo -e "  ${PURPLE}== Listener #${LISTENER_COUNT} ==${NC}"
 
         read -rp "  Bind address [0.0.0.0:$((4000+LISTENER_COUNT))]: " L_ADDR || true
         L_ADDR=${L_ADDR:-"0.0.0.0:$((4000+LISTENER_COUNT))"}
@@ -891,16 +950,19 @@ install_server_multilistener() {
 
         L_CERT=""; L_KEY=""
         if [[ "$L_TRANSPORT" == "httpsmux" || "$L_TRANSPORT" == "wssmux" ]]; then
-            if [[ -n "$GLOBAL_CERT" ]]; then
+            if [[ -n "$GLOBAL_CERT" && -f "$GLOBAL_CERT" ]]; then
                 L_CERT="$GLOBAL_CERT"; L_KEY="$GLOBAL_KEY"; ok "Using global SSL cert."
             else
                 read -rp "  Generate cert for listener #${LISTENER_COUNT}? [Y/n]: " GLC || true
                 if [[ ! $GLC =~ ^[Nn]$ ]]; then
                     read -rp "  Domain [www.google.com]: " LCD || true; LCD=${LCD:-www.google.com}
-                    gen_ssl_cert "$CONFIG_DIR/certs/cert_${LISTENER_COUNT}.pem" \
-                                 "$CONFIG_DIR/certs/key_${LISTENER_COUNT}.pem" "$LCD"
-                    L_CERT="$CONFIG_DIR/certs/cert_${LISTENER_COUNT}.pem"
-                    L_KEY="$CONFIG_DIR/certs/key_${LISTENER_COUNT}.pem"
+                    if gen_ssl_cert "$CONFIG_DIR/certs/cert_${LISTENER_COUNT}.pem" \
+                                    "$CONFIG_DIR/certs/key_${LISTENER_COUNT}.pem" "$LCD"; then
+                        L_CERT="$CONFIG_DIR/certs/cert_${LISTENER_COUNT}.pem"
+                        L_KEY="$CONFIG_DIR/certs/key_${LISTENER_COUNT}.pem"
+                    else
+                        warn "Cert failed for listener #${LISTENER_COUNT} — continuing without TLS."
+                    fi
                 fi
             fi
         fi
@@ -932,7 +994,7 @@ install_server_multilistener() {
         {
             echo "  - addr: \"${L_ADDR}\""
             echo "    transport: \"${L_TRANSPORT}\""
-            if [[ -n "$L_CERT" ]]; then
+            if [[ -n "$L_CERT" && -f "$L_CERT" ]]; then
                 echo "    cert_file: \"${L_CERT}\""
                 echo "    key_file: \"${L_KEY}\""
             fi
@@ -950,7 +1012,7 @@ install_server_multilistener() {
 
         LISTENER_COUNT=$((LISTENER_COUNT+1))
         ok "Listener #$((LISTENER_COUNT-1)): ${L_ADDR} (${L_TRANSPORT}) added."
-        $L_TUN_ENABLED && info "TUN: ${_TUN_NAME} — ${_TUN_LOCAL}/32 ↔ ${_TUN_PEER}"
+        $L_TUN_ENABLED && info "TUN: ${_TUN_NAME} — ${_TUN_LOCAL}/32 <-> ${_TUN_PEER}"
 
         read -rp "  Add another listener? [y/N]: " ML || true
         [[ ! $ML =~ ^[Yy]$ ]] && break
@@ -1113,7 +1175,7 @@ install_client_multipaths() {
     local HAS_DAGGERMUX=false HAS_RAWMUX=false
 
     while true; do
-        echo ""; echo -e "  ${PURPLE}══ Path #${PATH_COUNT} ══${NC}"
+        echo ""; echo -e "  ${PURPLE}== Path #${PATH_COUNT} ==${NC}"
 
         P_TRANSPORT=$(select_transport)
 
@@ -1164,9 +1226,9 @@ install_client_multipaths() {
         } >> "$CONFIG_FILE"
 
         PATH_COUNT=$((PATH_COUNT+1))
-        ok "Path #$((PATH_COUNT-1)): ${P_TRANSPORT} → ${P_ADDR} added."
+        ok "Path #$((PATH_COUNT-1)): ${P_TRANSPORT} -> ${P_ADDR} added."
         [[ -n "$P_PSK" ]] && info "PSK: custom"
-        $P_TUN_ENABLED && info "TUN: ${_TUN_NAME} — ${_TUN_LOCAL}/32 ↔ ${_TUN_PEER}"
+        $P_TUN_ENABLED && info "TUN: ${_TUN_NAME} — ${_TUN_LOCAL}/32 <-> ${_TUN_PEER}"
 
         read -rp "  Add another path? [y/N]: " MP || true
         [[ ! $MP =~ ^[Yy]$ ]] && break
@@ -1302,7 +1364,7 @@ update_binary() {
 
     download_binary
     local NEW_VERSION; NEW_VERSION=$(get_current_version)
-    ok "Updated: ${YELLOW}${CURRENT_VERSION}${NC} → ${GREEN}${NEW_VERSION}${NC}"
+    ok "Updated: ${YELLOW}${CURRENT_VERSION}${NC} -> ${GREEN}${NEW_VERSION}${NC}"
 
     if systemctl is-enabled DaggerConnect-server &>/dev/null || \
        systemctl is-enabled DaggerConnect-client &>/dev/null; then
@@ -1372,7 +1434,7 @@ service_management() {
                 systemctl stop    "$SERVICE_NAME" 2>/dev/null || true
                 systemctl disable "$SERVICE_NAME" 2>/dev/null || true
                 rm -f "$CONFIG_FILE" "$SYSTEMD_DIR/${SERVICE_NAME}.service"
-                systemctl daemon-reload
+                systemctl daemon-reload 2>/dev/null || true
                 ok "Deleted."; sleep 2
             fi
             settings_menu ;;
@@ -1399,6 +1461,8 @@ settings_menu() {
 
 # ============================================================================
 # UNINSTALL
+# FIX CRITICAL: iptables pipe with grep causes set -euo pipefail to exit
+# when grep finds no matches (exit code 1). Fixed with process substitution.
 # ============================================================================
 
 uninstall_daggerconnect() {
@@ -1422,18 +1486,25 @@ uninstall_daggerconnect() {
 
     section "Cleaning iptables rules"
     if command -v iptables &>/dev/null; then
-        iptables -t raw    -S 2>/dev/null | grep -E 'NOTRACK' | sed 's/^-A/-D/' | \
-            while read -r rule; do iptables -t raw    $rule 2>/dev/null || true; done
-        iptables -t mangle -S 2>/dev/null | grep -E 'RST.*DROP' | sed 's/^-A/-D/' | \
-            while read -r rule; do iptables -t mangle $rule 2>/dev/null || true; done
+        # FIX: Use process substitution (<(...)) instead of pipe
+        # With pipefail: cmd | grep "x" exits 1 when no match -> script dies
+        # Process substitution runs grep in a subshell, grep's exit code is ignored
+        while IFS= read -r rule; do
+            [[ -n "$rule" ]] && iptables -t raw $rule 2>/dev/null || true
+        done < <(iptables -t raw -S 2>/dev/null | grep -E 'NOTRACK' | sed 's/^-A/-D/' || true)
+
+        while IFS= read -r rule; do
+            [[ -n "$rule" ]] && iptables -t mangle $rule 2>/dev/null || true
+        done < <(iptables -t mangle -S 2>/dev/null | grep -E 'RST.*DROP' | sed 's/^-A/-D/' || true)
+
         ok "iptables rules cleaned."
         if command -v iptables-save &>/dev/null && [[ -f /etc/iptables/rules.v4 ]]; then
             iptables-save > /etc/iptables/rules.v4 2>/dev/null && ok "iptables ruleset saved."
         fi
     fi
 
-    sysctl -p > /dev/null 2>&1
-    systemctl daemon-reload
+    sysctl -p > /dev/null 2>&1 || true
+    systemctl daemon-reload 2>/dev/null || true
 
     ok "DaggerConnect uninstalled successfully."
     exit 0
@@ -1463,7 +1534,7 @@ show_status_dashboard() {
         echo ""
         local MODE_CAP
         MODE_CAP="$(echo "${MODE:0:1}" | tr '[:lower:]' '[:upper:]')${MODE:1}"
-        echo -e "  ${WHITE}── ${MODE_CAP} ──${NC}"
+        echo -e "  ${WHITE}-- ${MODE_CAP} --${NC}"
 
         if systemctl is-active --quiet "$SVC" 2>/dev/null; then
             echo -e "  Status:     ${GREEN}● RUNNING${NC}"
@@ -1496,7 +1567,7 @@ show_status_dashboard() {
     echo ""; divider
 
     echo ""
-    echo -e "  ${WHITE}── Network ──${NC}"
+    echo -e "  ${WHITE}-- Network --${NC}"
     local IFACE
     IFACE=$(ip link show | grep "state UP" | head -1 | awk '{print $2}' | cut -d: -f1)
     if [[ -n "$IFACE" ]]; then
