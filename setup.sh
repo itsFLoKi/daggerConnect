@@ -435,11 +435,26 @@ configure_tun() {
 }
 
 # ============================================================================
+# PORT VALIDATION HELPER
+# FIX: Centralized port validation to avoid repetition
+# ============================================================================
+
+_validate_port() {
+    local P=$1
+    local LABEL=${2:-"Port"}
+    if ! [[ "$P" =~ ^[0-9]+$ ]] || [[ "$P" -lt 1 || "$P" -gt 65535 ]]; then
+        err "${LABEL} '${P}' is invalid (must be 1–65535)."
+        return 1
+    fi
+    return 0
+}
+
+# ============================================================================
 # HELPER: BUILD PORT MAPPINGS
 # ============================================================================
 
-# BUG FIX #5 (revised): _do_add_mapping moved to top-level (outside while loop)
-# to avoid re-definition issues in bash with set -euo pipefail.
+# _do_add_mapping relies on BIND_IP, PROTO, COUNT, MAPPINGS from calling scope
+# (bash dynamic scoping — these are NOT subshells, so local vars are accessible)
 _do_add_mapping() {
     local BIND_P=$1
     local TARGET_ADDR=$2
@@ -458,7 +473,6 @@ build_port_mappings() {
     local TARGET_IP="127.0.0.1"
     MAPPINGS=""
     local COUNT=0
-    # PROTO is used by _do_add_mapping — must be accessible in same scope
     local PROTO="tcp"
 
     section "Port Mappings"
@@ -480,49 +494,86 @@ build_port_mappings() {
         [[ -z "$PORT_INPUT" ]] && err "Cannot be empty!" && continue
         PORT_INPUT=$(echo "$PORT_INPUT" | tr -d ' ')
 
-        # Range with custom IP: 5000/5010=1.2.3.4:8000/8010
+        # ── Pattern: range with custom IP — 5000/5010=1.2.3.4:8000/8010 ──────
         if [[ "$PORT_INPUT" =~ ^([0-9]+)/([0-9]+)=([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)/([0-9]+)$ ]]; then
             local BS="${BASH_REMATCH[1]}" BE="${BASH_REMATCH[2]}"
             local CTIP="${BASH_REMATCH[3]}" TS="${BASH_REMATCH[4]}" TE="${BASH_REMATCH[5]}"
+            # FIX #1: validate all four port boundaries
+            local _valid=true
+            _validate_port "$BS" "Bind start" || _valid=false
+            _validate_port "$BE" "Bind end"   || _valid=false
+            _validate_port "$TS" "Target start" || _valid=false
+            _validate_port "$TE" "Target end"   || _valid=false
+            [[ "$_valid" == "false" ]] && continue
             local BR=$((BE-BS+1)) TR=$((TE-TS+1))
-            [[ "$BR" -ne "$TR" ]] && err "Range size mismatch!" && continue
+            if [[ "$BR" -ne "$TR" ]]; then err "Range size mismatch!"; continue; fi
+            if [[ "$BS" -gt "$BE" ]]; then err "Bind start > end!"; continue; fi
+            local _total_entries; [[ "$PROTO" == "both" ]] && _total_entries=$((BR*2)) || _total_entries=$BR
             for ((i=0; i<BR; i++)); do _do_add_mapping $((BS+i)) "${CTIP}:$((TS+i))"; done
-            ok "Added: ${BS}-${BE} → ${CTIP}:${TS}-${TE} (${PROTO})"
+            ok "Added: ${BS}-${BE} → ${CTIP}:${TS}-${TE} (${PROTO}, ${_total_entries} entries)"
 
-        # Range mapping: 1000/1010=2000/2010
+        # ── Pattern: range mapping — 1000/1010=2000/2010 ─────────────────────
         elif [[ "$PORT_INPUT" =~ ^([0-9]+)/([0-9]+)=([0-9]+)/([0-9]+)$ ]]; then
             local BS="${BASH_REMATCH[1]}" BE="${BASH_REMATCH[2]}"
             local TS="${BASH_REMATCH[3]}" TE="${BASH_REMATCH[4]}"
+            # FIX #2: validate all four port boundaries
+            local _valid=true
+            _validate_port "$BS" "Bind start" || _valid=false
+            _validate_port "$BE" "Bind end"   || _valid=false
+            _validate_port "$TS" "Target start" || _valid=false
+            _validate_port "$TE" "Target end"   || _valid=false
+            [[ "$_valid" == "false" ]] && continue
             local BR=$((BE-BS+1)) TR=$((TE-TS+1))
-            [[ "$BR" -ne "$TR" ]] && err "Range size mismatch!" && continue
+            if [[ "$BR" -ne "$TR" ]]; then err "Range size mismatch!"; continue; fi
+            if [[ "$BS" -gt "$BE" ]]; then err "Bind start > end!"; continue; fi
+            local _total_entries; [[ "$PROTO" == "both" ]] && _total_entries=$((BR*2)) || _total_entries=$BR
             for ((i=0; i<BR; i++)); do _do_add_mapping $((BS+i)) "${TARGET_IP}:$((TS+i))"; done
-            ok "Added: ${BS}-${BE} → ${TS}-${TE} (${BR} ports, ${PROTO})"
+            ok "Added: ${BS}-${BE} → ${TS}-${TE} (${BR} ports, ${PROTO}, ${_total_entries} entries)"
 
-        # Range: 1000/2000
+        # ── Pattern: simple range — 1000/2000 ────────────────────────────────
         elif [[ "$PORT_INPUT" =~ ^([0-9]+)/([0-9]+)$ ]]; then
             local SP="${BASH_REMATCH[1]}" EP="${BASH_REMATCH[2]}"
-            [[ "$SP" -gt "$EP" ]] && err "Start > end!" && continue
+            # FIX #3: validate both endpoints are in valid port range
+            local _valid=true
+            _validate_port "$SP" "Start port" || _valid=false
+            _validate_port "$EP" "End port"   || _valid=false
+            [[ "$_valid" == "false" ]] && continue
+            if [[ "$SP" -gt "$EP" ]]; then err "Start > end!"; continue; fi
             local RS=$((EP-SP+1))
             if [[ "$RS" -gt 1000 ]]; then
                 read -rp "  Large range (${RS} ports). Continue? [y/N]: " cr || true
                 [[ ! $cr =~ ^[Yy]$ ]] && continue
             fi
+            local _total_entries; [[ "$PROTO" == "both" ]] && _total_entries=$((RS*2)) || _total_entries=$RS
             for ((port=SP; port<=EP; port++)); do _do_add_mapping "$port" "${TARGET_IP}:${port}"; done
-            ok "Added: ${SP}-${EP} (${RS} ports, ${PROTO})"
+            ok "Added: ${SP}-${EP} (${RS} ports, ${PROTO}, ${_total_entries} entries)"
 
-        # Custom with IP: 5000=1.2.3.4:8080
+        # ── Pattern: custom IP single — 5000=1.2.3.4:8080 ───────────────────
         elif [[ "$PORT_INPUT" =~ ^([0-9]+)=([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)$ ]]; then
-            _do_add_mapping "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}:${BASH_REMATCH[3]}"
-            ok "Added: ${BASH_REMATCH[1]} → ${BASH_REMATCH[2]}:${BASH_REMATCH[3]} (${PROTO})"
+            local BPORT="${BASH_REMATCH[1]}" CTIP="${BASH_REMATCH[2]}" TPORT="${BASH_REMATCH[3]}"
+            # FIX #4: validate both bind and target ports
+            local _valid=true
+            _validate_port "$BPORT" "Bind port"   || _valid=false
+            _validate_port "$TPORT" "Target port" || _valid=false
+            [[ "$_valid" == "false" ]] && continue
+            _do_add_mapping "${BPORT}" "${CTIP}:${TPORT}"
+            ok "Added: ${BPORT} → ${CTIP}:${TPORT} (${PROTO})"
 
-        # Custom: 5000=8080
+        # ── Pattern: custom map — 5000=8080 ──────────────────────────────────
         elif [[ "$PORT_INPUT" =~ ^([0-9]+)=([0-9]+)$ ]]; then
-            _do_add_mapping "${BASH_REMATCH[1]}" "${TARGET_IP}:${BASH_REMATCH[2]}"
-            ok "Added: ${BASH_REMATCH[1]} → ${BASH_REMATCH[2]} (${PROTO})"
+            local BPORT="${BASH_REMATCH[1]}" TPORT="${BASH_REMATCH[2]}"
+            # FIX #5: validate both bind and target ports
+            local _valid=true
+            _validate_port "$BPORT" "Bind port"   || _valid=false
+            _validate_port "$TPORT" "Target port" || _valid=false
+            [[ "$_valid" == "false" ]] && continue
+            _do_add_mapping "${BPORT}" "${TARGET_IP}:${TPORT}"
+            ok "Added: ${BPORT} → ${TPORT} (${PROTO})"
 
-        # Single port: 8080
+        # ── Pattern: single port — 8080 ───────────────────────────────────────
         elif [[ "$PORT_INPUT" =~ ^[0-9]+$ ]]; then
-            [[ "$PORT_INPUT" -lt 1 || "$PORT_INPUT" -gt 65535 ]] && err "Invalid port!" && continue
+            # FIX #6: use _validate_port instead of inline check for consistency
+            if ! _validate_port "$PORT_INPUT" "Port"; then continue; fi
             _do_add_mapping "$PORT_INPUT" "${TARGET_IP}:${PORT_INPUT}"
             ok "Added: ${PORT_INPUT} → ${PORT_INPUT} (${PROTO})"
 
@@ -662,8 +713,6 @@ _write_transport_extras() {
 
 # ============================================================================
 # HELPER: SAFE SERVICE START+ENABLE
-# BUG FIX #B: با set -e، اگه systemctl start fail کنه کل اسکریپت crash می‌کنه.
-# این function هر دو عملیات رو جدا از set -e اجرا می‌کنه.
 # ============================================================================
 
 safe_start_enable() {
@@ -703,7 +752,6 @@ install_server_automatic() {
         LISTEN_PORT=2020
     fi
 
-    # BUG FIX #E (part): port busy check — فقط warning میده، recursive restart نمی‌کنه
     if ! check_port_available "$LISTEN_PORT"; then
         read -rp "  Port ${LISTEN_PORT} is busy. Use it anyway? [y/N]: " frc || true
         if [[ ! $frc =~ ^[Yy]$ ]]; then
@@ -735,7 +783,6 @@ install_server_automatic() {
     CONFIG_FILE="$CONFIG_DIR/server.yaml"
     mkdir -p "$CONFIG_DIR"
 
-    # BUG FIX #8 (preserved): if blocks instead of && chaining to avoid short-circuit
     {
         echo "mode: \"server\""
         echo "psk: \"${PSK}\""
@@ -766,7 +813,6 @@ install_server_automatic() {
     read -rp "  Optimize system? [Y/n]: " opt || true
     [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "iran"
 
-    # BUG FIX #B: safe_start_enable به جای && chaining
     safe_start_enable "DaggerConnect-server"
 
     echo ""; divider
@@ -817,7 +863,6 @@ install_server_multilistener() {
     CONFIG_FILE="$CONFIG_DIR/server.yaml"
     mkdir -p "$CONFIG_DIR"
 
-    # BUG FIX #9 (preserved): if block instead of && chaining
     {
         echo "mode: \"server\""
         echo "psk: \"${GLOBAL_PSK}\""
@@ -862,7 +907,6 @@ install_server_multilistener() {
 
         if [[ "$L_TRANSPORT" == "daggermux" ]]; then
             L_PORT=$(echo "$L_ADDR" | cut -d: -f2)
-            # BUG FIX #10: validate port before iptables
             if [[ -z "$L_PORT" ]] || ! [[ "$L_PORT" =~ ^[0-9]+$ ]]; then
                 err "Could not parse port from address '${L_ADDR}'. Skipping iptables."
             else
@@ -885,7 +929,6 @@ install_server_multilistener() {
             L_TUN_ENABLED=true; configure_tun "$LISTENER_COUNT" "server"
         fi
 
-        # BUG FIX #11 (preserved): if block instead of && chaining for cert
         {
             echo "  - addr: \"${L_ADDR}\""
             echo "    transport: \"${L_TRANSPORT}\""
@@ -913,11 +956,6 @@ install_server_multilistener() {
         [[ ! $ML =~ ^[Yy]$ ]] && break
     done
 
-    # BUG FIX #H: write_daggermux_config / write_rawmux_config رو فقط وقتی لازمه اضافه می‌کنیم.
-    # چون _DM_* globals هر بار override میشن، فقط آخرین config نوشته می‌شد.
-    # این برای multi-listener یه limitation هست — کاربر باید بدونه فقط آخرین daggermux/rawmux
-    # config در بلوک global اعمال میشه. در صورت نیاز به چند daggermux، باید per-listener config
-    # پیاده‌سازی بشه که نیاز به refactor اساسی داره.
     $HAS_DAGGERMUX && write_daggermux_config "$CONFIG_FILE" "server"
     $HAS_RAWMUX    && write_rawmux_config    "$CONFIG_FILE"
 
@@ -927,7 +965,6 @@ install_server_multilistener() {
     read -rp "  Optimize system? [Y/n]: " opt || true
     [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "iran"
 
-    # BUG FIX #B: safe_start_enable به جای && chaining
     safe_start_enable "DaggerConnect-server"
 
     echo ""; divider
@@ -958,7 +995,6 @@ install_server() {
 
 # ============================================================================
 # AUTOMATIC CLIENT
-# BUG FIX #A + #D: اضافه کردن build_port_mappings و نوشتن maps در config
 # ============================================================================
 
 install_client_automatic() {
@@ -977,15 +1013,10 @@ install_client_automatic() {
         err "Address cannot be empty!"; install_client_automatic; return
     fi
 
-    # BUG FIX #12: validate host:port format
     if [[ "$ADDR" != *:* ]]; then
         err "Address must be in host:port format (e.g., 1.2.3.4:2020)."
         install_client_automatic; return
     fi
-
-    # BUG FIX #A: گرفتن port mappings از کاربر — قبلاً اصلاً call نمی‌شد
-    build_port_mappings
-    AUTO_MAPPINGS="$MAPPINGS"
 
     [[ "$TRANSPORT" == "daggermux" ]] && configure_daggermux "client"
     [[ "$TRANSPORT" == "rawmux"    ]] && configure_rawmux
@@ -993,16 +1024,12 @@ install_client_automatic() {
     CONFIG_FILE="$CONFIG_DIR/client.yaml"
     mkdir -p "$CONFIG_DIR"
 
-    # BUG FIX #D: نوشتن maps در config client
     {
         echo "mode: \"client\""
         echo "psk: \"${PSK}\""
         echo "profile: \"latency\""
         echo "verbose: true"
         echo "heartbeat: 2"
-        echo ""
-        echo "maps:"
-        printf '%b' "$AUTO_MAPPINGS"
         echo ""
         echo "paths:"
         echo "  - transport: \"${TRANSPORT}\""
@@ -1020,7 +1047,6 @@ install_client_automatic() {
     read -rp "  Optimize system? [Y/n]: " opt || true
     [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "foreign"
 
-    # BUG FIX #B: safe_start_enable به جای && chaining
     safe_start_enable "DaggerConnect-client"
 
     echo ""; divider
@@ -1070,10 +1096,6 @@ install_client_multipaths() {
         OBFUS_ENABLED="false"; OP1=16; OP2=512
     fi
 
-    # BUG FIX #A (multipath): گرفتن global maps از user
-    build_port_mappings
-    GLOBAL_MAPS="$MAPPINGS"
-
     CONFIG_FILE="$CONFIG_DIR/client.yaml"
     mkdir -p "$CONFIG_DIR"
 
@@ -1083,9 +1105,6 @@ install_client_multipaths() {
         echo "profile: \"${PROFILE}\""
         echo "verbose: ${VERBOSE}"
         echo "heartbeat: ${HB}"
-        echo ""
-        echo "maps:"
-        printf '%b' "$GLOBAL_MAPS"
         echo ""
         echo "paths:"
     } > "$CONFIG_FILE"
@@ -1101,7 +1120,6 @@ install_client_multipaths() {
         read -rp "  Server address:port: " P_ADDR || true
         [[ -z "$P_ADDR" ]] && err "Cannot be empty!" && continue
 
-        # BUG FIX #13: validate host:port format
         if [[ "$P_ADDR" != *:* ]]; then
             err "Address must be in host:port format."; continue
         fi
@@ -1157,7 +1175,6 @@ install_client_multipaths() {
     $HAS_DAGGERMUX && write_daggermux_config "$CONFIG_FILE" "client"
     $HAS_RAWMUX    && write_rawmux_config    "$CONFIG_FILE"
 
-    # Write full config tail with user-chosen obfuscation values
     cat >> "$CONFIG_FILE" << EOF
 
 smux:
@@ -1217,7 +1234,6 @@ EOF
     read -rp "  Optimize system? [Y/n]: " opt || true
     [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "foreign"
 
-    # BUG FIX #B: safe_start_enable به جای && chaining
     safe_start_enable "DaggerConnect-client"
 
     echo ""; divider
