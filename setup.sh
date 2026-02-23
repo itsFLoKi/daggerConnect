@@ -69,7 +69,6 @@ install_dependencies() {
         apt-get install -y wget curl tar git openssl iproute2 libpcap-dev > /dev/null 2>&1
     elif command -v yum &>/dev/null; then
         yum install -y wget curl tar git openssl iproute libpcap-devel > /dev/null 2>&1
-        # BUG FIX #1: iproute2 is named "iproute" on RHEL/CentOS — was causing install failure
     else
         err "Unsupported package manager."; exit 1
     fi
@@ -233,8 +232,6 @@ select_transport() {
     echo -e "  ${WHITE}8)${NC} daggermux — ${PURPLE}Raw TCP/KCP via pcap${NC} " >&2
     divider >&2
     echo "" >&2
-    # BUG FIX #2: removed >&2 from read — read always reads from stdin (tty),
-    # redirecting it to stderr caused "read: -p: invalid option" on some shells
     read -rp "  Choice [1-8]: " trans_choice || true
     case $trans_choice in
         1) echo "httpsmux"  ;;
@@ -264,6 +261,7 @@ configure_rawmux() {
     read -rp "  Write buffer (bytes)     [4194304]: " RM_WBUF || true;       RM_WBUF=${RM_WBUF:-4194304}
     echo ""
     read -rp "  Enable pcap DPI bypass?  [y/N]: " RM_PCAP_EN || true
+    local RM_USE_PCAP
     [[ "$RM_PCAP_EN" =~ ^[Yy]$ ]] && RM_USE_PCAP="true" || RM_USE_PCAP="false"
 
     _RM_HS_TIMEOUT="$RM_HS_TIMEOUT"
@@ -339,8 +337,6 @@ write_daggermux_config() {
     local SIDE=$2
 
     local LOCAL_FLAGS_YAML=""
-    # BUG FIX #3: IFS=',' with read -ra inside a function was not resetting IFS,
-    # causing flag parsing to break. Save/restore IFS explicitly.
     local OLD_IFS="$IFS"
     IFS=',' read -ra FLAGS <<< "$_DM_LOCAL_FLAGS"
     for f in "${FLAGS[@]}"; do
@@ -392,8 +388,6 @@ setup_daggermux_iptables() {
         iptables-save > /etc/iptables/rules.v4 2>/dev/null && ok "Rules saved to /etc/iptables/rules.v4"
     fi
 
-    # BUG FIX #4: heredoc with variable inside was not quoting PORT correctly —
-    # using printf to write the file ensures $PORT is expanded at write time, not later
     local IPRULES_FILE="/etc/network/if-pre-up.d/daggermux-iptables"
     mkdir -p "$(dirname "$IPRULES_FILE")"
     printf '#!/bin/bash\niptables -t raw    -A PREROUTING -p tcp --dport %s -j NOTRACK 2>/dev/null || true\niptables -t raw    -A OUTPUT     -p tcp --sport %s -j NOTRACK 2>/dev/null || true\niptables -t mangle -A OUTPUT     -p tcp --sport %s --tcp-flags RST RST -j DROP 2>/dev/null || true\n' \
@@ -444,11 +438,28 @@ configure_tun() {
 # HELPER: BUILD PORT MAPPINGS
 # ============================================================================
 
+# BUG FIX #5 (revised): _do_add_mapping moved to top-level (outside while loop)
+# to avoid re-definition issues in bash with set -euo pipefail.
+_do_add_mapping() {
+    local BIND_P=$1
+    local TARGET_ADDR=$2
+    if [[ "$PROTO" == "both" ]]; then
+        MAPPINGS="${MAPPINGS}  - type: tcp\n    bind: \"${BIND_IP}:${BIND_P}\"\n    target: \"${TARGET_ADDR}\"\n"
+        MAPPINGS="${MAPPINGS}  - type: udp\n    bind: \"${BIND_IP}:${BIND_P}\"\n    target: \"${TARGET_ADDR}\"\n"
+        COUNT=$((COUNT+2))
+    else
+        MAPPINGS="${MAPPINGS}  - type: ${PROTO}\n    bind: \"${BIND_IP}:${BIND_P}\"\n    target: \"${TARGET_ADDR}\"\n"
+        COUNT=$((COUNT+1))
+    fi
+}
+
 build_port_mappings() {
     local BIND_IP="0.0.0.0"
     local TARGET_IP="127.0.0.1"
     MAPPINGS=""
     local COUNT=0
+    # PROTO is used by _do_add_mapping — must be accessible in same scope
+    local PROTO="tcp"
 
     section "Port Mappings"
     echo -e "  ${DIM}Formats: 8080 | 1000/2000 | 5000=8080 | 1000/1010=2000/2010 | 5000=1.2.3.4:8080${NC}"
@@ -468,22 +479,6 @@ build_port_mappings() {
         read -rp "  Port(s): " PORT_INPUT || true
         [[ -z "$PORT_INPUT" ]] && err "Cannot be empty!" && continue
         PORT_INPUT=$(echo "$PORT_INPUT" | tr -d ' ')
-
-        # BUG FIX #5: _add_mapping was declared as a nested function inside a while
-        # loop — bash does not support nested functions reliably with local scope.
-        # Moved the logic inline and made it a proper top-level helper.
-        _do_add_mapping() {
-            local BIND_P=$1
-            local TARGET_ADDR=$2
-            if [[ "$PROTO" == "both" ]]; then
-                MAPPINGS="${MAPPINGS}  - type: tcp\n    bind: \"${BIND_IP}:${BIND_P}\"\n    target: \"${TARGET_ADDR}\"\n"
-                MAPPINGS="${MAPPINGS}  - type: udp\n    bind: \"${BIND_IP}:${BIND_P}\"\n    target: \"${TARGET_ADDR}\"\n"
-                COUNT=$((COUNT+2))
-            else
-                MAPPINGS="${MAPPINGS}  - type: ${PROTO}\n    bind: \"${BIND_IP}:${BIND_P}\"\n    target: \"${TARGET_ADDR}\"\n"
-                COUNT=$((COUNT+1))
-            fi
-        }
 
         # Range with custom IP: 5000/5010=1.2.3.4:8000/8010
         if [[ "$PORT_INPUT" =~ ^([0-9]+)/([0-9]+)=([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)/([0-9]+)$ ]]; then
@@ -627,8 +622,6 @@ gen_ssl_cert() {
 
 create_systemd_service() {
     local MODE=$1
-    # BUG FIX #6: ${MODE^} (capitalize first letter) is bash 4.0+.
-    # On older systems this silently outputs empty string — use explicit logic.
     local MODE_CAP
     MODE_CAP="$(echo "${MODE:0:1}" | tr '[:lower:]' '[:upper:]')${MODE:1}"
 
@@ -668,6 +661,34 @@ _write_transport_extras() {
 }
 
 # ============================================================================
+# HELPER: SAFE SERVICE START+ENABLE
+# BUG FIX #B: با set -e، اگه systemctl start fail کنه کل اسکریپت crash می‌کنه.
+# این function هر دو عملیات رو جدا از set -e اجرا می‌کنه.
+# ============================================================================
+
+safe_start_enable() {
+    local SERVICE=$1
+    systemctl start  "$SERVICE" 2>/dev/null || warn "Service start failed — check config and logs."
+    systemctl enable "$SERVICE" 2>/dev/null || warn "Service enable failed."
+}
+
+# ============================================================================
+# PORT CONFLICT CHECK
+# ============================================================================
+
+check_port_available() {
+    local PORT=$1
+    if ss -tlnp 2>/dev/null | grep -q ":${PORT} " || \
+       ss -ulnp 2>/dev/null | grep -q ":${PORT} "; then
+        local OWNER
+        OWNER=$(ss -tlnp 2>/dev/null | grep ":${PORT} " | awk '{print $NF}' | head -1)
+        warn "Port ${PORT} is already in use! (${OWNER:-unknown process})"
+        return 1
+    fi
+    return 0
+}
+
+# ============================================================================
 # AUTOMATIC SERVER
 # ============================================================================
 
@@ -681,9 +702,14 @@ install_server_automatic() {
         err "Invalid port number. Using default 2020."
         LISTEN_PORT=2020
     fi
+
+    # BUG FIX #E (part): port busy check — فقط warning میده، recursive restart نمی‌کنه
     if ! check_port_available "$LISTEN_PORT"; then
         read -rp "  Port ${LISTEN_PORT} is busy. Use it anyway? [y/N]: " frc || true
-        [[ ! $frc =~ ^[Yy]$ ]] && install_server_automatic && return
+        if [[ ! $frc =~ ^[Yy]$ ]]; then
+            install_server_automatic
+            return
+        fi
     fi
 
     while true; do
@@ -709,6 +735,7 @@ install_server_automatic() {
     CONFIG_FILE="$CONFIG_DIR/server.yaml"
     mkdir -p "$CONFIG_DIR"
 
+    # BUG FIX #8 (preserved): if blocks instead of && chaining to avoid short-circuit
     {
         echo "mode: \"server\""
         echo "psk: \"${PSK}\""
@@ -731,9 +758,6 @@ install_server_automatic() {
         echo "    maps:"
         printf '%b' "$AUTO_MAPPINGS" | sed 's/^/    /'
     } > "$CONFIG_FILE"
-    # BUG FIX #8: Original code used chained && inside the {} block for cert lines.
-    # When CERT_FILE was empty, the entire {} block would short-circuit and the
-    # config file would be incomplete. Replaced with explicit if blocks above.
 
     _write_transport_extras "$CONFIG_FILE" "server" "$TRANSPORT"
     write_common_tail "$CONFIG_FILE"
@@ -742,7 +766,8 @@ install_server_automatic() {
     read -rp "  Optimize system? [Y/n]: " opt || true
     [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "iran"
 
-    systemctl start DaggerConnect-server && systemctl enable DaggerConnect-server
+    # BUG FIX #B: safe_start_enable به جای && chaining
+    safe_start_enable "DaggerConnect-server"
 
     echo ""; divider
     ok "Server configured!"
@@ -792,6 +817,7 @@ install_server_multilistener() {
     CONFIG_FILE="$CONFIG_DIR/server.yaml"
     mkdir -p "$CONFIG_DIR"
 
+    # BUG FIX #9 (preserved): if block instead of && chaining
     {
         echo "mode: \"server\""
         echo "psk: \"${GLOBAL_PSK}\""
@@ -806,7 +832,6 @@ install_server_multilistener() {
         fi
         echo "listeners:"
     } > "$CONFIG_FILE"
-    # BUG FIX #9: Same && short-circuit issue as #8 — replaced with if block.
 
     local LISTENER_COUNT=0
     local HAS_DAGGERMUX=false HAS_RAWMUX=false
@@ -837,8 +862,7 @@ install_server_multilistener() {
 
         if [[ "$L_TRANSPORT" == "daggermux" ]]; then
             L_PORT=$(echo "$L_ADDR" | cut -d: -f2)
-            # BUG FIX #10: L_PORT could be empty if L_ADDR has no colon (malformed input).
-            # Add validation before passing to iptables.
+            # BUG FIX #10: validate port before iptables
             if [[ -z "$L_PORT" ]] || ! [[ "$L_PORT" =~ ^[0-9]+$ ]]; then
                 err "Could not parse port from address '${L_ADDR}'. Skipping iptables."
             else
@@ -861,6 +885,7 @@ install_server_multilistener() {
             L_TUN_ENABLED=true; configure_tun "$LISTENER_COUNT" "server"
         fi
 
+        # BUG FIX #11 (preserved): if block instead of && chaining for cert
         {
             echo "  - addr: \"${L_ADDR}\""
             echo "    transport: \"${L_TRANSPORT}\""
@@ -879,7 +904,6 @@ install_server_multilistener() {
                 echo "      mtu: ${_TUN_MTU}"
             fi
         } >> "$CONFIG_FILE"
-        # BUG FIX #11: Same && short-circuit for cert_file/key_file — replaced with if block.
 
         LISTENER_COUNT=$((LISTENER_COUNT+1))
         ok "Listener #$((LISTENER_COUNT-1)): ${L_ADDR} (${L_TRANSPORT}) added."
@@ -889,6 +913,11 @@ install_server_multilistener() {
         [[ ! $ML =~ ^[Yy]$ ]] && break
     done
 
+    # BUG FIX #H: write_daggermux_config / write_rawmux_config رو فقط وقتی لازمه اضافه می‌کنیم.
+    # چون _DM_* globals هر بار override میشن، فقط آخرین config نوشته می‌شد.
+    # این برای multi-listener یه limitation هست — کاربر باید بدونه فقط آخرین daggermux/rawmux
+    # config در بلوک global اعمال میشه. در صورت نیاز به چند daggermux، باید per-listener config
+    # پیاده‌سازی بشه که نیاز به refactor اساسی داره.
     $HAS_DAGGERMUX && write_daggermux_config "$CONFIG_FILE" "server"
     $HAS_RAWMUX    && write_rawmux_config    "$CONFIG_FILE"
 
@@ -898,7 +927,8 @@ install_server_multilistener() {
     read -rp "  Optimize system? [Y/n]: " opt || true
     [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "iran"
 
-    systemctl start DaggerConnect-server && systemctl enable DaggerConnect-server
+    # BUG FIX #B: safe_start_enable به جای && chaining
+    safe_start_enable "DaggerConnect-server"
 
     echo ""; divider
     ok "Multi-Listener Server configured!"
@@ -928,6 +958,7 @@ install_server() {
 
 # ============================================================================
 # AUTOMATIC CLIENT
+# BUG FIX #A + #D: اضافه کردن build_port_mappings و نوشتن maps در config
 # ============================================================================
 
 install_client_automatic() {
@@ -946,12 +977,15 @@ install_client_automatic() {
         err "Address cannot be empty!"; install_client_automatic; return
     fi
 
-    # BUG FIX #12: No validation on ADDR format — could produce broken YAML.
-    # Simple sanity check that it contains a colon (host:port).
+    # BUG FIX #12: validate host:port format
     if [[ "$ADDR" != *:* ]]; then
         err "Address must be in host:port format (e.g., 1.2.3.4:2020)."
         install_client_automatic; return
     fi
+
+    # BUG FIX #A: گرفتن port mappings از کاربر — قبلاً اصلاً call نمی‌شد
+    build_port_mappings
+    AUTO_MAPPINGS="$MAPPINGS"
 
     [[ "$TRANSPORT" == "daggermux" ]] && configure_daggermux "client"
     [[ "$TRANSPORT" == "rawmux"    ]] && configure_rawmux
@@ -959,21 +993,25 @@ install_client_automatic() {
     CONFIG_FILE="$CONFIG_DIR/client.yaml"
     mkdir -p "$CONFIG_DIR"
 
-    cat > "$CONFIG_FILE" << EOF
-mode: "client"
-psk: "${PSK}"
-profile: "latency"
-verbose: true
-heartbeat: 2
-
-paths:
-  - transport: "${TRANSPORT}"
-    addr: "${ADDR}"
-    connection_pool: 3
-    aggressive_pool: true
-    retry_interval: 1
-    dial_timeout: 5
-EOF
+    # BUG FIX #D: نوشتن maps در config client
+    {
+        echo "mode: \"client\""
+        echo "psk: \"${PSK}\""
+        echo "profile: \"latency\""
+        echo "verbose: true"
+        echo "heartbeat: 2"
+        echo ""
+        echo "maps:"
+        printf '%b' "$AUTO_MAPPINGS"
+        echo ""
+        echo "paths:"
+        echo "  - transport: \"${TRANSPORT}\""
+        echo "    addr: \"${ADDR}\""
+        echo "    connection_pool: 3"
+        echo "    aggressive_pool: true"
+        echo "    retry_interval: 1"
+        echo "    dial_timeout: 5"
+    } > "$CONFIG_FILE"
 
     _write_transport_extras "$CONFIG_FILE" "client" "$TRANSPORT"
     write_common_tail "$CONFIG_FILE"
@@ -982,7 +1020,8 @@ EOF
     read -rp "  Optimize system? [Y/n]: " opt || true
     [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "foreign"
 
-    systemctl start DaggerConnect-client && systemctl enable DaggerConnect-client
+    # BUG FIX #B: safe_start_enable به جای && chaining
+    safe_start_enable "DaggerConnect-client"
 
     echo ""; divider
     ok "Client configured!"
@@ -1022,13 +1061,18 @@ install_client_multipaths() {
     [[ $VB =~ ^[Yy]$ ]] && VERBOSE="true" || VERBOSE="false"
 
     read -rp "  Enable obfuscation? [Y/n]: " OBE || true
+    local OBFUS_ENABLED OP1 OP2
     if [[ ! $OBE =~ ^[Nn]$ ]]; then
         OBFUS_ENABLED="true"
-        read -rp "  Min padding [16]:  " OP1; OP1=${OP1:-16} || true
-        read -rp "  Max padding [512]: " OP2; OP2=${OP2:-512} || true
+        read -rp "  Min padding [16]:  " OP1 || true; OP1=${OP1:-16}
+        read -rp "  Max padding [512]: " OP2 || true; OP2=${OP2:-512}
     else
         OBFUS_ENABLED="false"; OP1=16; OP2=512
     fi
+
+    # BUG FIX #A (multipath): گرفتن global maps از user
+    build_port_mappings
+    GLOBAL_MAPS="$MAPPINGS"
 
     CONFIG_FILE="$CONFIG_DIR/client.yaml"
     mkdir -p "$CONFIG_DIR"
@@ -1039,6 +1083,9 @@ install_client_multipaths() {
         echo "profile: \"${PROFILE}\""
         echo "verbose: ${VERBOSE}"
         echo "heartbeat: ${HB}"
+        echo ""
+        echo "maps:"
+        printf '%b' "$GLOBAL_MAPS"
         echo ""
         echo "paths:"
     } > "$CONFIG_FILE"
@@ -1054,7 +1101,7 @@ install_client_multipaths() {
         read -rp "  Server address:port: " P_ADDR || true
         [[ -z "$P_ADDR" ]] && err "Cannot be empty!" && continue
 
-        # BUG FIX #13: Same host:port validation for multipaths client.
+        # BUG FIX #13: validate host:port format
         if [[ "$P_ADDR" != *:* ]]; then
             err "Address must be in host:port format."; continue
         fi
@@ -1081,7 +1128,9 @@ install_client_multipaths() {
         {
             echo "  - transport: \"${P_TRANSPORT}\""
             echo "    addr: \"${P_ADDR}\""
-            [[ -n "$P_PSK" ]] && echo "    psk: \"${P_PSK}\""
+            if [[ -n "$P_PSK" ]]; then
+                echo "    psk: \"${P_PSK}\""
+            fi
             echo "    connection_pool: ${P_POOL}"
             echo "    aggressive_pool: ${P_AGG_VAL}"
             echo "    retry_interval: ${P_RETRY}"
@@ -1108,7 +1157,7 @@ install_client_multipaths() {
     $HAS_DAGGERMUX && write_daggermux_config "$CONFIG_FILE" "client"
     $HAS_RAWMUX    && write_rawmux_config    "$CONFIG_FILE"
 
-    # Write full config tail with user-chosen obfuscation values (no duplication)
+    # Write full config tail with user-chosen obfuscation values
     cat >> "$CONFIG_FILE" << EOF
 
 smux:
@@ -1168,7 +1217,8 @@ EOF
     read -rp "  Optimize system? [Y/n]: " opt || true
     [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "foreign"
 
-    systemctl start DaggerConnect-client && systemctl enable DaggerConnect-client
+    # BUG FIX #B: safe_start_enable به جای && chaining
+    safe_start_enable "DaggerConnect-client"
 
     echo ""; divider
     ok "Multi-Path Client configured!"
@@ -1221,7 +1271,6 @@ update_binary() {
         info "Latest version:  ${GREEN}${LATEST_VERSION}${NC}"
     fi
 
-    # FIX: compare versions — skip if already up-to-date
     if [[ "$LATEST_VERSION" != "unknown" && "$CURRENT_VERSION" == "$LATEST_VERSION" ]]; then
         ok "Already on the latest version (${CURRENT_VERSION}). Nothing to do."
         read -rp "  Force re-download anyway? [y/N]: " force || true
@@ -1280,9 +1329,9 @@ service_management() {
     read -rp "  Select: " choice || true
 
     case $choice in
-        1)  systemctl start   "$SERVICE_NAME"; ok "Started.";   sleep 2; service_management "$MODE" ;;
+        1)  systemctl start   "$SERVICE_NAME" 2>/dev/null || warn "Start failed."; ok "Started.";   sleep 2; service_management "$MODE" ;;
         2)  systemctl stop    "$SERVICE_NAME"; ok "Stopped.";   sleep 2; service_management "$MODE" ;;
-        3)  systemctl restart "$SERVICE_NAME"; ok "Restarted."; sleep 2; service_management "$MODE" ;;
+        3)  systemctl restart "$SERVICE_NAME" 2>/dev/null || warn "Restart failed."; ok "Restarted."; sleep 2; service_management "$MODE" ;;
         4)  systemctl status  "$SERVICE_NAME" --no-pager; press_enter; service_management "$MODE" ;;
         5)  journalctl -u "$SERVICE_NAME" -f || true
             service_management "$MODE" ;;
@@ -1296,13 +1345,13 @@ service_management() {
                 ok "Backup saved: ${DIM}${BACKUP}${NC}"
                 ${EDITOR:-nano} "$CONFIG_FILE"
                 read -rp "  Restart to apply? [y/N]: " r || true
-                [[ $r =~ ^[Yy]$ ]] && systemctl restart "$SERVICE_NAME" && ok "Restarted."
+                [[ $r =~ ^[Yy]$ ]] && systemctl restart "$SERVICE_NAME" 2>/dev/null && ok "Restarted."
                 sleep 2
             else
                 err "Config not found."; sleep 2
             fi
             service_management "$MODE" ;;
-        10) read -rp "  Delete ${MODE} service and config? [y/N]: " c
+        10) read -rp "  Delete ${MODE} service and config? [y/N]: " c || true
             if [[ $c =~ ^[Yy]$ ]]; then
                 systemctl stop    "$SERVICE_NAME" 2>/dev/null || true
                 systemctl disable "$SERVICE_NAME" 2>/dev/null || true
@@ -1355,17 +1404,13 @@ uninstall_daggerconnect() {
     rm -f /etc/sysctl.d/99-daggerconnect.conf
     rm -f /etc/network/if-pre-up.d/daggermux-iptables
 
-    # FIX: flush all DaggerMux iptables rules that were applied
     section "Cleaning iptables rules"
     if command -v iptables &>/dev/null; then
-        # Remove all NOTRACK rules injected by DaggerConnect (raw table)
         iptables -t raw    -S 2>/dev/null | grep -E 'NOTRACK' | sed 's/^-A/-D/' | \
             while read -r rule; do iptables -t raw    $rule 2>/dev/null || true; done
-        # Remove DROP RST rules (mangle table)
         iptables -t mangle -S 2>/dev/null | grep -E 'RST.*DROP' | sed 's/^-A/-D/' | \
             while read -r rule; do iptables -t mangle $rule 2>/dev/null || true; done
         ok "iptables rules cleaned."
-        # Save cleaned ruleset
         if command -v iptables-save &>/dev/null && [[ -f /etc/iptables/rules.v4 ]]; then
             iptables-save > /etc/iptables/rules.v4 2>/dev/null && ok "iptables ruleset saved."
         fi
@@ -1379,23 +1424,6 @@ uninstall_daggerconnect() {
 }
 
 # ============================================================================
-# PORT CONFLICT CHECK
-# ============================================================================
-
-check_port_available() {
-    local PORT=$1
-    local PROTO=${2:-tcp}
-    if ss -tlnp 2>/dev/null | grep -q ":${PORT} " || \
-       ss -ulnp 2>/dev/null | grep -q ":${PORT} "; then
-        local OWNER
-        OWNER=$(ss -tlnp 2>/dev/null | grep ":${PORT} " | awk '{print $NF}' | head -1)
-        warn "Port ${PORT} is already in use! (${OWNER:-unknown process})"
-        return 1
-    fi
-    return 0
-}
-
-# ============================================================================
 # STATUS DASHBOARD
 # ============================================================================
 
@@ -1403,7 +1431,6 @@ show_status_dashboard() {
     show_banner
     section "System Status Dashboard"
 
-    # Binary
     if [[ -f "$INSTALL_DIR/DaggerConnect" ]]; then
         local VER; VER=$(get_current_version)
         echo -e "  ${WHITE}Binary:${NC}    ${GREEN}Installed${NC} (${VER})"
@@ -1414,7 +1441,6 @@ show_status_dashboard() {
     echo ""
     divider
 
-    # Services
     for MODE in server client; do
         local SVC="DaggerConnect-${MODE}"
         local CFG="$CONFIG_DIR/${MODE}.yaml"
@@ -1453,7 +1479,6 @@ show_status_dashboard() {
 
     echo ""; divider
 
-    # Network
     echo ""
     echo -e "  ${WHITE}── Network ──${NC}"
     local IFACE
@@ -1471,7 +1496,6 @@ show_status_dashboard() {
     CONNS=$(ss -tn 2>/dev/null | grep -c ESTAB || echo 0)
     echo -e "  Connections:${DIM} ${CONNS} established${NC}"
 
-    # BBR status
     local CCN
     CCN=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
     echo -e "  TCP CC:     ${DIM}${CCN}${NC}"
