@@ -98,7 +98,8 @@ download_binary() {
     local BINARY_URL="https://github.com/itsFLoKi/DaggerConnect/releases/download/${LATEST_VERSION}/DaggerConnect"
     info "Latest version: ${GREEN}${LATEST_VERSION}${NC}"
 
-    [[ -f "$INSTALL_DIR/DaggerConnect" ]] && mv "$INSTALL_DIR/DaggerConnect" "$INSTALL_DIR/DaggerConnect.backup"
+    # FIX: || true prevents crash when no backup exists
+    [[ -f "$INSTALL_DIR/DaggerConnect" ]] && mv "$INSTALL_DIR/DaggerConnect" "$INSTALL_DIR/DaggerConnect.backup" || true
 
     if wget -q --show-progress "$BINARY_URL" -O "$INSTALL_DIR/DaggerConnect"; then
         chmod +x "$INSTALL_DIR/DaggerConnect"
@@ -127,40 +128,39 @@ optimize_system() {
     [[ -z "$INTERFACE" ]] && INTERFACE="eth0"
     info "Interface: ${GREEN}${INTERFACE}${NC}"
 
-    sysctl -w net.core.rmem_max=8388608               > /dev/null 2>&1
-    sysctl -w net.core.wmem_max=8388608               > /dev/null 2>&1
-    sysctl -w net.core.rmem_default=131072            > /dev/null 2>&1
-    sysctl -w net.core.wmem_default=131072            > /dev/null 2>&1
-    sysctl -w net.ipv4.tcp_rmem="4096 65536 8388608"  > /dev/null 2>&1
-    sysctl -w net.ipv4.tcp_wmem="4096 65536 8388608"  > /dev/null 2>&1
-    sysctl -w net.ipv4.tcp_window_scaling=1           > /dev/null 2>&1
-    sysctl -w net.ipv4.tcp_timestamps=1               > /dev/null 2>&1
-    sysctl -w net.ipv4.tcp_sack=1                     > /dev/null 2>&1
-    sysctl -w net.ipv4.tcp_retries2=6                 > /dev/null 2>&1
-    sysctl -w net.ipv4.tcp_syn_retries=2              > /dev/null 2>&1
-    sysctl -w net.core.netdev_max_backlog=1000         > /dev/null 2>&1
-    sysctl -w net.core.somaxconn=512                  > /dev/null 2>&1
-    sysctl -w net.ipv4.tcp_fastopen=3                 > /dev/null 2>&1
-    sysctl -w net.ipv4.tcp_low_latency=1              > /dev/null 2>&1
-    sysctl -w net.ipv4.tcp_slow_start_after_idle=0    > /dev/null 2>&1
-    sysctl -w net.ipv4.tcp_no_metrics_save=1          > /dev/null 2>&1
-    sysctl -w net.ipv4.tcp_autocorking=0              > /dev/null 2>&1
-    sysctl -w net.ipv4.tcp_mtu_probing=1              > /dev/null 2>&1
-    sysctl -w net.ipv4.tcp_keepalive_time=120         > /dev/null 2>&1
-    sysctl -w net.ipv4.tcp_keepalive_intvl=10         > /dev/null 2>&1
-    sysctl -w net.ipv4.tcp_keepalive_probes=3         > /dev/null 2>&1
-    sysctl -w net.ipv4.tcp_fin_timeout=15             > /dev/null 2>&1
-    sysctl -w net.ipv4.ip_forward=1                   > /dev/null 2>&1
+    sysctl -w net.core.rmem_max=8388608               > /dev/null 2>&1 || true
+    sysctl -w net.core.wmem_max=8388608               > /dev/null 2>&1 || true
+    sysctl -w net.core.rmem_default=131072            > /dev/null 2>&1 || true
+    sysctl -w net.core.wmem_default=131072            > /dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_rmem="4096 65536 8388608"  > /dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_wmem="4096 65536 8388608"  > /dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_window_scaling=1           > /dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_timestamps=1               > /dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_sack=1                     > /dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_retries2=6                 > /dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_syn_retries=2              > /dev/null 2>&1 || true
+    sysctl -w net.core.netdev_max_backlog=1000         > /dev/null 2>&1 || true
+    sysctl -w net.core.somaxconn=512                  > /dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_fastopen=3                 > /dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_low_latency=1              > /dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_slow_start_after_idle=0    > /dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_no_metrics_save=1          > /dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_autocorking=0              > /dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_mtu_probing=1              > /dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_keepalive_time=120         > /dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_keepalive_intvl=10         > /dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_keepalive_probes=3         > /dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_fin_timeout=15             > /dev/null 2>&1 || true
+    sysctl -w net.ipv4.ip_forward=1                   > /dev/null 2>&1 || true
 
     if modprobe tcp_bbr 2>/dev/null; then
-        sysctl -w net.ipv4.tcp_congestion_control=bbr > /dev/null 2>&1
-        sysctl -w net.core.default_qdisc=fq_codel     > /dev/null 2>&1
+        sysctl -w net.ipv4.tcp_congestion_control=bbr > /dev/null 2>&1 || true
+        sysctl -w net.core.default_qdisc=fq_codel     > /dev/null 2>&1 || true
         ok "BBR congestion control enabled."
     else
         warn "BBR not available — using CUBIC."
     fi
 
-    # FIX: tc may fail on containers/OpenVZ — catch it gracefully
     tc qdisc del dev "$INTERFACE" root 2>/dev/null || true
     if tc qdisc add dev "$INTERFACE" root fq_codel limit 500 target 3ms interval 50ms quantum 300 ecn 2>/dev/null; then
         ok "fq_codel qdisc configured."
@@ -356,8 +356,8 @@ write_daggermux_config() {
     {
         echo ""
         echo "daggermux:"
-        [[ -n "$_DM_IFACE" ]]    && echo "  interface: \"${_DM_IFACE}\""
-        [[ -n "$_DM_LOCAL_IP" ]] && echo "  local_ip: \"${_DM_LOCAL_IP}\""
+        [[ -n "$_DM_IFACE" ]]    && echo "  interface: \"${_DM_IFACE}\""   || true
+        [[ -n "$_DM_LOCAL_IP" ]] && echo "  local_ip: \"${_DM_LOCAL_IP}\"" || true
         if [[ "$SIDE" == "client" && -n "$_DM_ROUTER_MAC" ]]; then
             echo "  router_mac: \"${_DM_ROUTER_MAC}\""
         fi
@@ -386,7 +386,7 @@ setup_daggermux_iptables() {
 
     if command -v iptables-save &>/dev/null; then
         mkdir -p /etc/iptables
-        iptables-save > /etc/iptables/rules.v4 2>/dev/null && ok "Rules saved to /etc/iptables/rules.v4"
+        iptables-save > /etc/iptables/rules.v4 2>/dev/null && ok "Rules saved to /etc/iptables/rules.v4" || true
     fi
 
     local IPRULES_FILE="/etc/network/if-pre-up.d/daggermux-iptables"
@@ -492,7 +492,6 @@ build_port_mappings() {
         [[ -z "$PORT_INPUT" ]] && err "Cannot be empty!" && continue
         PORT_INPUT=$(echo "$PORT_INPUT" | tr -d ' ')
 
-        # Pattern: range with custom IP — 5000/5010=1.2.3.4:8000/8010
         if [[ "$PORT_INPUT" =~ ^([0-9]+)/([0-9]+)=([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)/([0-9]+)$ ]]; then
             local BS="${BASH_REMATCH[1]}" BE="${BASH_REMATCH[2]}"
             local CTIP="${BASH_REMATCH[3]}" TS="${BASH_REMATCH[4]}" TE="${BASH_REMATCH[5]}"
@@ -509,7 +508,6 @@ build_port_mappings() {
             for ((i=0; i<BR; i++)); do _do_add_mapping $((BS+i)) "${CTIP}:$((TS+i))"; done
             ok "Added: ${BS}-${BE} -> ${CTIP}:${TS}-${TE} (${PROTO}, ${_total_entries} entries)"
 
-        # Pattern: range mapping — 1000/1010=2000/2010
         elif [[ "$PORT_INPUT" =~ ^([0-9]+)/([0-9]+)=([0-9]+)/([0-9]+)$ ]]; then
             local BS="${BASH_REMATCH[1]}" BE="${BASH_REMATCH[2]}"
             local TS="${BASH_REMATCH[3]}" TE="${BASH_REMATCH[4]}"
@@ -526,7 +524,6 @@ build_port_mappings() {
             for ((i=0; i<BR; i++)); do _do_add_mapping $((BS+i)) "${TARGET_IP}:$((TS+i))"; done
             ok "Added: ${BS}-${BE} -> ${TS}-${TE} (${BR} ports, ${PROTO}, ${_total_entries} entries)"
 
-        # Pattern: simple range — 1000/2000
         elif [[ "$PORT_INPUT" =~ ^([0-9]+)/([0-9]+)$ ]]; then
             local SP="${BASH_REMATCH[1]}" EP="${BASH_REMATCH[2]}"
             local _valid=true
@@ -543,7 +540,6 @@ build_port_mappings() {
             for ((port=SP; port<=EP; port++)); do _do_add_mapping "$port" "${TARGET_IP}:${port}"; done
             ok "Added: ${SP}-${EP} (${RS} ports, ${PROTO}, ${_total_entries} entries)"
 
-        # Pattern: custom IP single — 5000=1.2.3.4:8080
         elif [[ "$PORT_INPUT" =~ ^([0-9]+)=([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)$ ]]; then
             local BPORT="${BASH_REMATCH[1]}" CTIP="${BASH_REMATCH[2]}" TPORT="${BASH_REMATCH[3]}"
             local _valid=true
@@ -553,7 +549,6 @@ build_port_mappings() {
             _do_add_mapping "${BPORT}" "${CTIP}:${TPORT}"
             ok "Added: ${BPORT} -> ${CTIP}:${TPORT} (${PROTO})"
 
-        # Pattern: custom map — 5000=8080
         elif [[ "$PORT_INPUT" =~ ^([0-9]+)=([0-9]+)$ ]]; then
             local BPORT="${BASH_REMATCH[1]}" TPORT="${BASH_REMATCH[2]}"
             local _valid=true
@@ -563,7 +558,6 @@ build_port_mappings() {
             _do_add_mapping "${BPORT}" "${TARGET_IP}:${TPORT}"
             ok "Added: ${BPORT} -> ${TPORT} (${PROTO})"
 
-        # Pattern: single port — 8080
         elif [[ "$PORT_INPUT" =~ ^[0-9]+$ ]]; then
             if ! _validate_port "$PORT_INPUT" "Port"; then continue; fi
             _do_add_mapping "$PORT_INPUT" "${TARGET_IP}:${PORT_INPUT}"
@@ -646,9 +640,6 @@ EOF
 
 # ============================================================================
 # SSL CERT HELPER
-# FIX 1: Sanitize domain input to prevent openssl -subj injection/failure
-# FIX 2: Clean up partial files on failure
-# FIX 3: Return proper exit code so callers can check success
 # ============================================================================
 
 gen_ssl_cert() {
@@ -656,13 +647,10 @@ gen_ssl_cert() {
     local KEY_OUT=$2
     local DOMAIN=$3
 
-    # Sanitize domain — strip chars that break openssl -subj
     DOMAIN=$(echo "$DOMAIN" | tr -cd 'a-zA-Z0-9._-')
     [[ -z "$DOMAIN" ]] && DOMAIN="www.google.com"
 
     mkdir -p "$(dirname "$CERT_OUT")"
-
-    # Remove any stale partial files before attempting
     rm -f "$CERT_OUT" "$KEY_OUT"
 
     if openssl req -x509 -newkey rsa:4096 \
@@ -674,7 +662,6 @@ gen_ssl_cert() {
         return 0
     else
         err "SSL certificate generation failed."
-        # Clean up broken partial files
         rm -f "$CERT_OUT" "$KEY_OUT"
         return 1
     fi
@@ -682,9 +669,6 @@ gen_ssl_cert() {
 
 # ============================================================================
 # SYSTEMD SERVICE
-# FIX: systemctl daemon-reload must not exit the script on failure
-# FIX: Added mkdir -p for SYSTEMD_DIR
-# FIX: Added Wants=network-online.target for better startup ordering
 # ============================================================================
 
 create_systemd_service() {
@@ -692,7 +676,6 @@ create_systemd_service() {
     local MODE_CAP
     MODE_CAP="$(echo "${MODE:0:1}" | tr '[:lower:]' '[:upper:]')${MODE:1}"
 
-    # Ensure systemd directory exists (some minimal installs may not have it)
     mkdir -p "$SYSTEMD_DIR"
 
     cat > "$SYSTEMD_DIR/DaggerConnect-${MODE}.service" << EOF
@@ -716,44 +699,46 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 EOF
 
-    # FIX: daemon-reload failure (e.g. in containers) must NOT kill the script
+    # FIX: daemon-reload failure must NOT kill the script
     if ! systemctl daemon-reload 2>/dev/null; then
-        warn "systemctl daemon-reload failed — this may happen in containers. Continuing."
+        warn "systemctl daemon-reload failed — may happen in containers. Continuing."
     fi
     ok "Systemd service created: DaggerConnect-${MODE}"
 }
 
 # ============================================================================
 # _write_transport_extras
+# FIX ROOT CAUSE: [[ cond ]] && cmd without || true crashes with set -e
+# when condition is FALSE. Every transport check needs || true.
 # ============================================================================
 
 _write_transport_extras() {
     local FILE=$1
     local SIDE=$2
     local TRANSPORT=$3
-    [[ "$TRANSPORT" == "daggermux" ]] && write_daggermux_config "$FILE" "$SIDE"
-    [[ "$TRANSPORT" == "rawmux"    ]] && write_rawmux_config    "$FILE"
+    # FIX: Added || true to BOTH lines — without it, the FALSE branch
+    # returns exit code 1 which kills the script under set -euo pipefail
+    [[ "$TRANSPORT" == "daggermux" ]] && write_daggermux_config "$FILE" "$SIDE" || true
+    [[ "$TRANSPORT" == "rawmux"    ]] && write_rawmux_config    "$FILE"          || true
 }
 
 # ============================================================================
 # HELPER: SAFE SERVICE START+ENABLE
-# FIX: Verify service file exists before starting
 # ============================================================================
 
 safe_start_enable() {
     local SERVICE=$1
     if [[ ! -f "$SYSTEMD_DIR/${SERVICE}.service" ]]; then
         err "Service file not found: $SYSTEMD_DIR/${SERVICE}.service"
-        warn "Config was saved. You can start manually: systemctl start ${SERVICE}"
+        warn "Config was saved. Start manually: systemctl start ${SERVICE}"
         return 1
     fi
-    systemctl start  "$SERVICE" 2>/dev/null || warn "Service start failed — check logs: journalctl -u ${SERVICE} -n 50"
+    systemctl start  "$SERVICE" 2>/dev/null || warn "Service start failed — check: journalctl -u ${SERVICE} -n 50"
     systemctl enable "$SERVICE" 2>/dev/null || warn "Service enable failed."
 }
 
 # ============================================================================
 # PORT CONFLICT CHECK
-# FIX: Fallback to netstat if ss is unavailable
 # ============================================================================
 
 check_port_available() {
@@ -775,7 +760,7 @@ check_port_available() {
     if $IN_USE; then
         local OWNER=""
         command -v ss &>/dev/null && \
-            OWNER=$(ss -tlnp 2>/dev/null | grep ":${PORT} " | awk '{print $NF}' | head -1)
+            OWNER=$(ss -tlnp 2>/dev/null | grep ":${PORT} " | awk '{print $NF}' | head -1) || true
         warn "Port ${PORT} is already in use! (${OWNER:-unknown process})"
         return 1
     fi
@@ -815,7 +800,6 @@ install_server_automatic() {
     build_port_mappings
     AUTO_MAPPINGS="$MAPPINGS"
 
-    # FIX: Check cert generation result before using cert paths
     CERT_FILE=""; KEY_FILE=""
     if [[ "$TRANSPORT" == "httpsmux" || "$TRANSPORT" == "wssmux" ]]; then
         read -rp "  Domain for SSL cert [www.google.com]: " CD || true; CD=${CD:-www.google.com}
@@ -831,8 +815,14 @@ install_server_automatic() {
         fi
     fi
 
-    [[ "$TRANSPORT" == "daggermux" ]] && configure_daggermux "server" && setup_daggermux_iptables "$LISTEN_PORT"
-    [[ "$TRANSPORT" == "rawmux"    ]] && configure_rawmux
+    # FIX: Use if/then instead of [[ ]] && chain to avoid pipefail crash
+    if [[ "$TRANSPORT" == "daggermux" ]]; then
+        configure_daggermux "server"
+        setup_daggermux_iptables "$LISTEN_PORT"
+    fi
+    if [[ "$TRANSPORT" == "rawmux" ]]; then
+        configure_rawmux
+    fi
 
     CONFIG_FILE="$CONFIG_DIR/server.yaml"
     mkdir -p "$CONFIG_DIR"
@@ -844,7 +834,6 @@ install_server_automatic() {
         echo "verbose: true"
         echo "heartbeat: 2"
         echo ""
-        # FIX: Only write cert config if files actually exist on disk
         if [[ -n "$CERT_FILE" && -f "$CERT_FILE" && -n "$KEY_FILE" && -f "$KEY_FILE" ]]; then
             echo "cert_file: \"${CERT_FILE}\""
             echo "key_file: \"${KEY_FILE}\""
@@ -866,7 +855,7 @@ install_server_automatic() {
     create_systemd_service "server"
 
     read -rp "  Optimize system? [Y/n]: " opt || true
-    [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "iran"
+    [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "iran" || true
 
     safe_start_enable "DaggerConnect-server"
 
@@ -876,7 +865,7 @@ install_server_automatic() {
     info "Transport: ${GREEN}${TRANSPORT}${NC}"
     info "Config:    ${CONFIG_FILE}"
     info "Logs:      journalctl -u DaggerConnect-server -f"
-    [[ "$TRANSPORT" == "daggermux" ]] && warn "DaggerMux: iptables rules applied, root + libpcap required."
+    [[ "$TRANSPORT" == "daggermux" ]] && warn "DaggerMux: iptables rules applied, root + libpcap required." || true
     divider; press_enter; main_menu
 }
 
@@ -1012,20 +1001,22 @@ install_server_multilistener() {
 
         LISTENER_COUNT=$((LISTENER_COUNT+1))
         ok "Listener #$((LISTENER_COUNT-1)): ${L_ADDR} (${L_TRANSPORT}) added."
-        $L_TUN_ENABLED && info "TUN: ${_TUN_NAME} — ${_TUN_LOCAL}/32 <-> ${_TUN_PEER}"
+        # FIX: Boolean flag check needs || true
+        $L_TUN_ENABLED && info "TUN: ${_TUN_NAME} — ${_TUN_LOCAL}/32 <-> ${_TUN_PEER}" || true
 
         read -rp "  Add another listener? [y/N]: " ML || true
         [[ ! $ML =~ ^[Yy]$ ]] && break
     done
 
-    $HAS_DAGGERMUX && write_daggermux_config "$CONFIG_FILE" "server"
-    $HAS_RAWMUX    && write_rawmux_config    "$CONFIG_FILE"
+    # FIX: Boolean flag checks need || true — FALSE value exits with code 1 = crash
+    $HAS_DAGGERMUX && write_daggermux_config "$CONFIG_FILE" "server" || true
+    $HAS_RAWMUX    && write_rawmux_config    "$CONFIG_FILE"          || true
 
     write_common_tail "$CONFIG_FILE"
     create_systemd_service "server"
 
     read -rp "  Optimize system? [Y/n]: " opt || true
-    [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "iran"
+    [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "iran" || true
 
     safe_start_enable "DaggerConnect-server"
 
@@ -1034,7 +1025,8 @@ install_server_multilistener() {
     info "Listeners: ${GREEN}${LISTENER_COUNT}${NC}"
     info "Config:    ${CONFIG_FILE}"
     info "Logs:      journalctl -u DaggerConnect-server -f"
-    $HAS_DAGGERMUX && warn "DaggerMux: iptables rules applied, libpcap installed."
+    # FIX: Boolean check needs || true
+    $HAS_DAGGERMUX && warn "DaggerMux: iptables rules applied, libpcap installed." || true
     divider; press_enter; main_menu
 }
 
@@ -1080,8 +1072,9 @@ install_client_automatic() {
         install_client_automatic; return
     fi
 
-    [[ "$TRANSPORT" == "daggermux" ]] && configure_daggermux "client"
-    [[ "$TRANSPORT" == "rawmux"    ]] && configure_rawmux
+    # FIX: Use if/then instead of [[ ]] && chain
+    if [[ "$TRANSPORT" == "daggermux" ]]; then configure_daggermux "client"; fi
+    if [[ "$TRANSPORT" == "rawmux" ]];    then configure_rawmux; fi
 
     CONFIG_FILE="$CONFIG_DIR/client.yaml"
     mkdir -p "$CONFIG_DIR"
@@ -1107,7 +1100,7 @@ install_client_automatic() {
     create_systemd_service "client"
 
     read -rp "  Optimize system? [Y/n]: " opt || true
-    [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "foreign"
+    [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "foreign" || true
 
     safe_start_enable "DaggerConnect-client"
 
@@ -1117,7 +1110,7 @@ install_client_automatic() {
     info "Transport: ${GREEN}${TRANSPORT}${NC}"
     info "Config:    ${CONFIG_FILE}"
     info "Logs:      journalctl -u DaggerConnect-client -f"
-    [[ "$TRANSPORT" == "daggermux" ]] && warn "DaggerMux: ensure server has iptables rules applied."
+    [[ "$TRANSPORT" == "daggermux" ]] && warn "DaggerMux: ensure server has iptables rules applied." || true
     divider; press_enter; main_menu
 }
 
@@ -1188,7 +1181,7 @@ install_client_multipaths() {
 
         read -rsp "  Custom PSK? [blank = use global]: " P_PSK_RAW || true; echo ""
         P_PSK=""
-        [[ -n "$P_PSK_RAW" ]] && P_PSK="$P_PSK_RAW" && ok "Custom PSK will be used."
+        [[ -n "$P_PSK_RAW" ]] && P_PSK="$P_PSK_RAW" && ok "Custom PSK will be used." || true
 
         read -rp "  Connection pool  [2]:  " P_POOL || true;  P_POOL=${P_POOL:-2}
         read -rp "  Aggressive pool? [y/N]: " P_AGG || true
@@ -1196,8 +1189,9 @@ install_client_multipaths() {
         read -rp "  Retry interval (s) [3]:  " P_RETRY || true; P_RETRY=${P_RETRY:-3}
         read -rp "  Dial timeout   (s) [10]: " P_DIAL || true;  P_DIAL=${P_DIAL:-10}
 
-        [[ "$P_TRANSPORT" == "daggermux" ]] && configure_daggermux "client" && HAS_DAGGERMUX=true
-        [[ "$P_TRANSPORT" == "rawmux"    ]] && configure_rawmux             && HAS_RAWMUX=true
+        # FIX: Use if/then — [[ ]] && cmd crashes on false with set -e
+        if [[ "$P_TRANSPORT" == "daggermux" ]]; then configure_daggermux "client"; HAS_DAGGERMUX=true; fi
+        if [[ "$P_TRANSPORT" == "rawmux" ]];    then configure_rawmux;             HAS_RAWMUX=true;    fi
 
         read -rp "  Enable TUN for this path? [y/N]: " P_TUN_EN || true
         P_TUN_ENABLED=false
@@ -1227,15 +1221,17 @@ install_client_multipaths() {
 
         PATH_COUNT=$((PATH_COUNT+1))
         ok "Path #$((PATH_COUNT-1)): ${P_TRANSPORT} -> ${P_ADDR} added."
-        [[ -n "$P_PSK" ]] && info "PSK: custom"
-        $P_TUN_ENABLED && info "TUN: ${_TUN_NAME} — ${_TUN_LOCAL}/32 <-> ${_TUN_PEER}"
+        [[ -n "$P_PSK" ]] && info "PSK: custom" || true
+        # FIX: Boolean check needs || true
+        $P_TUN_ENABLED && info "TUN: ${_TUN_NAME} — ${_TUN_LOCAL}/32 <-> ${_TUN_PEER}" || true
 
         read -rp "  Add another path? [y/N]: " MP || true
         [[ ! $MP =~ ^[Yy]$ ]] && break
     done
 
-    $HAS_DAGGERMUX && write_daggermux_config "$CONFIG_FILE" "client"
-    $HAS_RAWMUX    && write_rawmux_config    "$CONFIG_FILE"
+    # FIX: Boolean flag checks need || true
+    $HAS_DAGGERMUX && write_daggermux_config "$CONFIG_FILE" "client" || true
+    $HAS_RAWMUX    && write_rawmux_config    "$CONFIG_FILE"          || true
 
     cat >> "$CONFIG_FILE" << EOF
 
@@ -1294,7 +1290,7 @@ EOF
     create_systemd_service "client"
 
     read -rp "  Optimize system? [Y/n]: " opt || true
-    [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "foreign"
+    [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "foreign" || true
 
     safe_start_enable "DaggerConnect-client"
 
@@ -1303,7 +1299,7 @@ EOF
     info "Paths:  ${GREEN}${PATH_COUNT}${NC}"
     info "Config: ${CONFIG_FILE}"
     info "Logs:   journalctl -u DaggerConnect-client -f"
-    $HAS_DAGGERMUX && warn "DaggerMux: ensure server has iptables rules applied."
+    $HAS_DAGGERMUX && warn "DaggerMux: ensure server has iptables rules applied." || true
     divider; press_enter; main_menu
 }
 
@@ -1371,9 +1367,9 @@ update_binary() {
         read -rp "  Restart services? [Y/n]: " r || true
         if [[ ! $r =~ ^[Nn]$ ]]; then
             systemctl is-enabled DaggerConnect-server &>/dev/null && \
-                systemctl start DaggerConnect-server && ok "Server restarted."
+                systemctl start DaggerConnect-server && ok "Server restarted." || true
             systemctl is-enabled DaggerConnect-client &>/dev/null && \
-                systemctl start DaggerConnect-client && ok "Client restarted."
+                systemctl start DaggerConnect-client && ok "Client restarted." || true
         fi
     fi
     press_enter; main_menu
@@ -1408,13 +1404,13 @@ service_management() {
 
     case $choice in
         1)  systemctl start   "$SERVICE_NAME" 2>/dev/null || warn "Start failed."; ok "Started.";   sleep 2; service_management "$MODE" ;;
-        2)  systemctl stop    "$SERVICE_NAME"; ok "Stopped.";   sleep 2; service_management "$MODE" ;;
+        2)  systemctl stop    "$SERVICE_NAME" 2>/dev/null || true; ok "Stopped."; sleep 2; service_management "$MODE" ;;
         3)  systemctl restart "$SERVICE_NAME" 2>/dev/null || warn "Restart failed."; ok "Restarted."; sleep 2; service_management "$MODE" ;;
         4)  systemctl status  "$SERVICE_NAME" --no-pager; press_enter; service_management "$MODE" ;;
         5)  journalctl -u "$SERVICE_NAME" -f || true
             service_management "$MODE" ;;
-        6)  systemctl enable  "$SERVICE_NAME"; ok "Auto-start enabled.";  sleep 2; service_management "$MODE" ;;
-        7)  systemctl disable "$SERVICE_NAME"; ok "Auto-start disabled."; sleep 2; service_management "$MODE" ;;
+        6)  systemctl enable  "$SERVICE_NAME" 2>/dev/null || warn "Enable failed."; ok "Auto-start enabled.";  sleep 2; service_management "$MODE" ;;
+        7)  systemctl disable "$SERVICE_NAME" 2>/dev/null || warn "Disable failed."; ok "Auto-start disabled."; sleep 2; service_management "$MODE" ;;
         8)  [[ -f "$CONFIG_FILE" ]] && cat "$CONFIG_FILE" || err "Config not found."
             press_enter; service_management "$MODE" ;;
         9)  if [[ -f "$CONFIG_FILE" ]]; then
@@ -1423,7 +1419,7 @@ service_management() {
                 ok "Backup saved: ${DIM}${BACKUP}${NC}"
                 ${EDITOR:-nano} "$CONFIG_FILE"
                 read -rp "  Restart to apply? [y/N]: " r || true
-                [[ $r =~ ^[Yy]$ ]] && systemctl restart "$SERVICE_NAME" 2>/dev/null && ok "Restarted."
+                [[ $r =~ ^[Yy]$ ]] && systemctl restart "$SERVICE_NAME" 2>/dev/null && ok "Restarted." || true
                 sleep 2
             else
                 err "Config not found."; sleep 2
@@ -1461,8 +1457,6 @@ settings_menu() {
 
 # ============================================================================
 # UNINSTALL
-# FIX CRITICAL: iptables pipe with grep causes set -euo pipefail to exit
-# when grep finds no matches (exit code 1). Fixed with process substitution.
 # ============================================================================
 
 uninstall_daggerconnect() {
@@ -1486,9 +1480,8 @@ uninstall_daggerconnect() {
 
     section "Cleaning iptables rules"
     if command -v iptables &>/dev/null; then
-        # FIX: Use process substitution (<(...)) instead of pipe
-        # With pipefail: cmd | grep "x" exits 1 when no match -> script dies
-        # Process substitution runs grep in a subshell, grep's exit code is ignored
+        # FIX: Process substitution instead of pipe — grep non-match (exit 1)
+        # kills script with set -euo pipefail when used in a pipe
         while IFS= read -r rule; do
             [[ -n "$rule" ]] && iptables -t raw $rule 2>/dev/null || true
         done < <(iptables -t raw -S 2>/dev/null | grep -E 'NOTRACK' | sed 's/^-A/-D/' || true)
@@ -1499,7 +1492,7 @@ uninstall_daggerconnect() {
 
         ok "iptables rules cleaned."
         if command -v iptables-save &>/dev/null && [[ -f /etc/iptables/rules.v4 ]]; then
-            iptables-save > /etc/iptables/rules.v4 2>/dev/null && ok "iptables ruleset saved."
+            iptables-save > /etc/iptables/rules.v4 2>/dev/null && ok "iptables ruleset saved." || true
         fi
     fi
 
@@ -1540,7 +1533,7 @@ show_status_dashboard() {
             echo -e "  Status:     ${GREEN}● RUNNING${NC}"
             local UPTIME
             UPTIME=$(systemctl show "$SVC" --property=ActiveEnterTimestamp 2>/dev/null | cut -d= -f2)
-            [[ -n "$UPTIME" ]] && echo -e "  Started:    ${DIM}${UPTIME}${NC}"
+            [[ -n "$UPTIME" ]] && echo -e "  Started:    ${DIM}${UPTIME}${NC}" || true
             local MEM
             MEM=$(systemctl show "$SVC" --property=MemoryCurrent 2>/dev/null | cut -d= -f2)
             if [[ -n "$MEM" && "$MEM" != "18446744073709551615" && "$MEM" != "[not set]" ]]; then
@@ -1558,9 +1551,9 @@ show_status_dashboard() {
             TRANSPORT=$(grep 'transport:' "$CFG" | head -1 | awk '{print $2}' | tr -d '"')
             PORT_COUNT=$(grep -c 'type:' "$CFG" 2>/dev/null || echo 0)
             LISTEN_PORT=$(grep 'addr:' "$CFG" | head -1 | awk '{print $2}' | tr -d '"' | cut -d: -f2)
-            [[ -n "$TRANSPORT"   ]] && echo -e "  Transport:  ${DIM}${TRANSPORT}${NC}"
-            [[ -n "$LISTEN_PORT" ]] && echo -e "  Port:       ${DIM}${LISTEN_PORT}${NC}"
-            [[ "$PORT_COUNT" -gt 0 ]] && echo -e "  Mappings:   ${DIM}${PORT_COUNT}${NC}"
+            [[ -n "$TRANSPORT"    ]] && echo -e "  Transport:  ${DIM}${TRANSPORT}${NC}"   || true
+            [[ -n "$LISTEN_PORT"  ]] && echo -e "  Port:       ${DIM}${LISTEN_PORT}${NC}" || true
+            [[ "$PORT_COUNT" -gt 0 ]] && echo -e "  Mappings:   ${DIM}${PORT_COUNT}${NC}" || true
         fi
     done
 
@@ -1595,10 +1588,11 @@ main_menu() {
     show_banner
 
     local CURRENT_VER; CURRENT_VER=$(get_current_version)
-    [[ "$CURRENT_VER" != "not-installed" ]] && echo -e "  Version: ${GREEN}${CURRENT_VER}${NC}" && echo ""
+    # FIX: Boolean check with || true
+    [[ "$CURRENT_VER" != "not-installed" ]] && echo -e "  Version: ${GREEN}${CURRENT_VER}${NC}" && echo "" || true
 
-    systemctl is-active --quiet DaggerConnect-server 2>/dev/null && echo -e "  Server : ${GREEN}● RUNNING${NC}"
-    systemctl is-active --quiet DaggerConnect-client 2>/dev/null && echo -e "  Client : ${GREEN}● RUNNING${NC}"
+    systemctl is-active --quiet DaggerConnect-server 2>/dev/null && echo -e "  Server : ${GREEN}● RUNNING${NC}" || true
+    systemctl is-active --quiet DaggerConnect-client 2>/dev/null && echo -e "  Client : ${GREEN}● RUNNING${NC}" || true
 
     echo ""; divider
     echo -e "  ${WHITE}1)${NC} Install / Configure Server"
