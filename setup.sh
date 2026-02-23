@@ -230,7 +230,7 @@ select_transport() {
     echo -e "  ${WHITE}5)${NC} kcpmux    — KCP over UDP" >&2
     echo -e "  ${WHITE}6)${NC} tcpmux    — Simple TCP" >&2
     echo -e "  ${WHITE}7)${NC} rawmux    — ${CYAN}Raw KCP/UDP + DPI Bypass${NC}" >&2
-    echo -e "  ${WHITE}8)${NC} daggermux — ${PURPLE}Raw TCP/KCP via pcap${NC} (root + libpcap required)" >&2
+    echo -e "  ${WHITE}8)${NC} daggermux — ${PURPLE}Raw TCP/KCP via pcap${NC} " >&2
     divider >&2
     echo "" >&2
     # BUG FIX #2: removed >&2 from read — read always reads from stdin (tty),
