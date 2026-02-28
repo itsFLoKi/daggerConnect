@@ -12,6 +12,7 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/DaggerConnect"
 SYSTEMD_DIR="/etc/systemd/system"
 LATEST_RELEASE_API="https://api.github.com/repos/itsFLoKi/DaggerConnect/releases/latest"
+BINARY_VERSION="v1.4"
 
 # ── Global state vars ────────────────────────────────────────────────────────
 _TUN_NAME=""; _TUN_LOCAL=""; _TUN_PEER=""; _TUN_MTU="1400"
@@ -21,6 +22,8 @@ _DM_IFACE=""; _DM_LOCAL_IP=""; _DM_ROUTER_MAC=""
 _DM_MTU="1350"; _DM_SND_WND="1024"; _DM_RCV_WND="1024"
 _DM_DATA_SHARD="10"; _DM_PARITY_SHARD="1"
 _DM_LOCAL_FLAGS="PA,A"; _DM_REMOTE_FLAGS="PA,A"
+_QM_MTU="1350"; _QM_SND_WND="4096"; _QM_RCV_WND="4096"
+_QM_DATA_SHARD="10"; _QM_PARITY_SHARD="1"; _QM_SOCK_BUF="33554432"
 MAPPINGS=""
 
 # ============================================================================
@@ -93,7 +96,7 @@ download_binary() {
 
     local LATEST_VERSION
     LATEST_VERSION=$(curl -s "$LATEST_RELEASE_API" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    [[ -z "$LATEST_VERSION" ]] && warn "Could not fetch latest version — using v1.3.5" && LATEST_VERSION="v1.3.5"
+    [[ -z "$LATEST_VERSION" ]] && warn "Could not fetch latest version — using ${BINARY_VERSION}" && LATEST_VERSION="$BINARY_VERSION"
 
     local BINARY_URL="https://github.com/itsFLoKi/DaggerConnect/releases/download/${LATEST_VERSION}/DaggerConnect"
     info "Latest version: ${GREEN}${LATEST_VERSION}${NC}"
@@ -223,27 +226,29 @@ select_transport() {
     echo "" >&2
     echo -e "  ${YELLOW}Select Transport:${NC}" >&2
     divider >&2
-    echo -e "  ${WHITE}1)${NC} httpsmux  — HTTPS Mimicry ${GREEN}(Recommended)${NC}" >&2
-    echo -e "  ${WHITE}2)${NC} httpmux   — HTTP Mimicry" >&2
-    echo -e "  ${WHITE}3)${NC} wssmux    — WebSocket Secure" >&2
-    echo -e "  ${WHITE}4)${NC} wsmux     — WebSocket" >&2
-    echo -e "  ${WHITE}5)${NC} kcpmux    — KCP over UDP" >&2
-    echo -e "  ${WHITE}6)${NC} tcpmux    — Simple TCP" >&2
-    echo -e "  ${WHITE}7)${NC} rawmux    — ${CYAN}Raw KCP/UDP + DPI Bypass${NC}" >&2
-    echo -e "  ${WHITE}8)${NC} daggermux — ${PURPLE}Raw TCP/KCP via pcap${NC} " >&2
+    echo -e "  ${WHITE}1)${NC} httpsmux   — HTTPS Mimicry ${GREEN}(Recommended)${NC}" >&2
+    echo -e "  ${WHITE}2)${NC} httpmux    — HTTP Mimicry" >&2
+    echo -e "  ${WHITE}3)${NC} wssmux     — WebSocket Secure" >&2
+    echo -e "  ${WHITE}4)${NC} wsmux      — WebSocket" >&2
+    echo -e "  ${WHITE}5)${NC} kcpmux     — KCP over UDP" >&2
+    echo -e "  ${WHITE}6)${NC} tcpmux     — Simple TCP" >&2
+    echo -e "  ${WHITE}7)${NC} rawmux     — ${CYAN}Raw KCP/UDP + DPI Bypass${NC}" >&2
+    echo -e "  ${WHITE}8)${NC} daggermux  — ${PURPLE}Raw TCP/KCP via pcap${NC}" >&2
+    echo -e "  ${WHITE}9)${NC} quantummux — ${YELLOW}Quantum UDP Tunnel${NC}" >&2
     divider >&2
     echo "" >&2
-    read -rp "  Choice [1-8]: " trans_choice || true
+    read -rp "  Choice [1-9]: " trans_choice || true
     case $trans_choice in
-        1) echo "httpsmux"  ;;
-        2) echo "httpmux"   ;;
-        3) echo "wssmux"    ;;
-        4) echo "wsmux"     ;;
-        5) echo "kcpmux"    ;;
-        6) echo "tcpmux"    ;;
-        7) echo "rawmux"    ;;
-        8) echo "daggermux" ;;
-        *) echo "httpsmux"  ;;
+        1) echo "httpsmux"   ;;
+        2) echo "httpmux"    ;;
+        3) echo "wssmux"     ;;
+        4) echo "wsmux"      ;;
+        5) echo "kcpmux"     ;;
+        6) echo "tcpmux"     ;;
+        7) echo "rawmux"     ;;
+        8) echo "daggermux"  ;;
+        9) echo "quantummux" ;;
+        *) echo "httpsmux"   ;;
     esac
 }
 
@@ -282,6 +287,46 @@ write_rawmux_config() {
         echo "  read_buffer: ${_RM_RBUF}"
         echo "  write_buffer: ${_RM_WBUF}"
         echo "  use_pcap: ${_RM_USE_PCAP}"
+    } >> "$FILE"
+}
+
+# ============================================================================
+# HELPER: CONFIGURE QUANTUMMUX
+# ============================================================================
+
+configure_quantummux() {
+    section "QuantumMux Configuration"
+    info "Quantum UDP tunnel with FEC (Forward Error Correction)."
+    echo ""
+
+    read -rp "  MTU                      [1350]:     " QM_MTU || true;          QM_MTU=${QM_MTU:-1350}
+    read -rp "  Send window              [4096]:     " QM_SND_WND || true;      QM_SND_WND=${QM_SND_WND:-4096}
+    read -rp "  Recv window              [4096]:     " QM_RCV_WND || true;      QM_RCV_WND=${QM_RCV_WND:-4096}
+    echo ""
+    echo -e "  ${DIM}FEC — lower parity = less overhead (1 is usually optimal)${NC}"
+    read -rp "  Data shards              [10]:       " QM_DATA_SHARD || true;   QM_DATA_SHARD=${QM_DATA_SHARD:-10}
+    read -rp "  Parity shards            [1]:        " QM_PARITY_SHARD || true; QM_PARITY_SHARD=${QM_PARITY_SHARD:-1}
+    read -rp "  Socket buffer (bytes)    [33554432]: " QM_SOCK_BUF || true;     QM_SOCK_BUF=${QM_SOCK_BUF:-33554432}
+
+    _QM_MTU="$QM_MTU"
+    _QM_SND_WND="$QM_SND_WND"
+    _QM_RCV_WND="$QM_RCV_WND"
+    _QM_DATA_SHARD="$QM_DATA_SHARD"
+    _QM_PARITY_SHARD="$QM_PARITY_SHARD"
+    _QM_SOCK_BUF="$QM_SOCK_BUF"
+}
+
+write_quantummux_config() {
+    local FILE=$1
+    {
+        echo ""
+        echo "quantummux:"
+        echo "  mtu: ${_QM_MTU}"
+        echo "  snd_wnd: ${_QM_SND_WND}"
+        echo "  rcv_wnd: ${_QM_RCV_WND}"
+        echo "  data_shard: ${_QM_DATA_SHARD}"
+        echo "  parity_shard: ${_QM_PARITY_SHARD}"
+        echo "  sock_buf: ${_QM_SOCK_BUF}"
     } >> "$FILE"
 }
 
@@ -699,7 +744,6 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 EOF
 
-    # FIX: daemon-reload failure must NOT kill the script
     if ! systemctl daemon-reload 2>/dev/null; then
         warn "systemctl daemon-reload failed — may happen in containers. Continuing."
     fi
@@ -708,18 +752,15 @@ EOF
 
 # ============================================================================
 # _write_transport_extras
-# FIX ROOT CAUSE: [[ cond ]] && cmd without || true crashes with set -e
-# when condition is FALSE. Every transport check needs || true.
 # ============================================================================
 
 _write_transport_extras() {
     local FILE=$1
     local SIDE=$2
     local TRANSPORT=$3
-    # FIX: Added || true to BOTH lines — without it, the FALSE branch
-    # returns exit code 1 which kills the script under set -euo pipefail
-    [[ "$TRANSPORT" == "daggermux" ]] && write_daggermux_config "$FILE" "$SIDE" || true
-    [[ "$TRANSPORT" == "rawmux"    ]] && write_rawmux_config    "$FILE"          || true
+    [[ "$TRANSPORT" == "daggermux"  ]] && write_daggermux_config  "$FILE" "$SIDE" || true
+    [[ "$TRANSPORT" == "rawmux"     ]] && write_rawmux_config     "$FILE"          || true
+    [[ "$TRANSPORT" == "quantummux" ]] && write_quantummux_config "$FILE"          || true
 }
 
 # ============================================================================
@@ -815,14 +856,12 @@ install_server_automatic() {
         fi
     fi
 
-    # FIX: Use if/then instead of [[ ]] && chain to avoid pipefail crash
     if [[ "$TRANSPORT" == "daggermux" ]]; then
         configure_daggermux "server"
         setup_daggermux_iptables "$LISTEN_PORT"
     fi
-    if [[ "$TRANSPORT" == "rawmux" ]]; then
-        configure_rawmux
-    fi
+    if [[ "$TRANSPORT" == "rawmux" ]];     then configure_rawmux;              fi
+    if [[ "$TRANSPORT" == "quantummux" ]]; then configure_quantummux;           fi
 
     CONFIG_FILE="$CONFIG_DIR/server.yaml"
     mkdir -p "$CONFIG_DIR"
@@ -865,7 +904,8 @@ install_server_automatic() {
     info "Transport: ${GREEN}${TRANSPORT}${NC}"
     info "Config:    ${CONFIG_FILE}"
     info "Logs:      journalctl -u DaggerConnect-server -f"
-    [[ "$TRANSPORT" == "daggermux" ]] && warn "DaggerMux: iptables rules applied, root + libpcap required." || true
+    [[ "$TRANSPORT" == "daggermux"  ]] && warn "DaggerMux: iptables rules applied, root + libpcap required." || true
+    [[ "$TRANSPORT" == "quantummux" ]] && info "QuantumMux: UDP-based tunnel active." || true
     divider; press_enter; main_menu
 }
 
@@ -927,7 +967,7 @@ install_server_multilistener() {
     } > "$CONFIG_FILE"
 
     local LISTENER_COUNT=0
-    local HAS_DAGGERMUX=false HAS_RAWMUX=false
+    local HAS_DAGGERMUX=false HAS_RAWMUX=false HAS_QUANTUMMUX=false
 
     while true; do
         echo ""; echo -e "  ${PURPLE}== Listener #${LISTENER_COUNT} ==${NC}"
@@ -972,6 +1012,11 @@ install_server_multilistener() {
             HAS_RAWMUX=true
         fi
 
+        if [[ "$L_TRANSPORT" == "quantummux" ]]; then
+            configure_quantummux
+            HAS_QUANTUMMUX=true
+        fi
+
         build_port_mappings; L_MAPPINGS="$MAPPINGS"
 
         read -rp "  Enable TUN for listener #${LISTENER_COUNT}? [y/N]: " L_TUN_EN || true
@@ -1001,16 +1046,15 @@ install_server_multilistener() {
 
         LISTENER_COUNT=$((LISTENER_COUNT+1))
         ok "Listener #$((LISTENER_COUNT-1)): ${L_ADDR} (${L_TRANSPORT}) added."
-        # FIX: Boolean flag check needs || true
         $L_TUN_ENABLED && info "TUN: ${_TUN_NAME} — ${_TUN_LOCAL}/32 <-> ${_TUN_PEER}" || true
 
         read -rp "  Add another listener? [y/N]: " ML || true
         [[ ! $ML =~ ^[Yy]$ ]] && break
     done
 
-    # FIX: Boolean flag checks need || true — FALSE value exits with code 1 = crash
-    $HAS_DAGGERMUX && write_daggermux_config "$CONFIG_FILE" "server" || true
-    $HAS_RAWMUX    && write_rawmux_config    "$CONFIG_FILE"          || true
+    $HAS_DAGGERMUX  && write_daggermux_config  "$CONFIG_FILE" "server" || true
+    $HAS_RAWMUX     && write_rawmux_config     "$CONFIG_FILE"          || true
+    $HAS_QUANTUMMUX && write_quantummux_config "$CONFIG_FILE"          || true
 
     write_common_tail "$CONFIG_FILE"
     create_systemd_service "server"
@@ -1025,8 +1069,8 @@ install_server_multilistener() {
     info "Listeners: ${GREEN}${LISTENER_COUNT}${NC}"
     info "Config:    ${CONFIG_FILE}"
     info "Logs:      journalctl -u DaggerConnect-server -f"
-    # FIX: Boolean check needs || true
-    $HAS_DAGGERMUX && warn "DaggerMux: iptables rules applied, libpcap installed." || true
+    $HAS_DAGGERMUX  && warn "DaggerMux: iptables rules applied, libpcap installed." || true
+    $HAS_QUANTUMMUX && info "QuantumMux: UDP-based tunnel active." || true
     divider; press_enter; main_menu
 }
 
@@ -1072,9 +1116,9 @@ install_client_automatic() {
         install_client_automatic; return
     fi
 
-    # FIX: Use if/then instead of [[ ]] && chain
-    if [[ "$TRANSPORT" == "daggermux" ]]; then configure_daggermux "client"; fi
-    if [[ "$TRANSPORT" == "rawmux" ]];    then configure_rawmux; fi
+    if [[ "$TRANSPORT" == "daggermux" ]];  then configure_daggermux "client"; fi
+    if [[ "$TRANSPORT" == "rawmux" ]];     then configure_rawmux;              fi
+    if [[ "$TRANSPORT" == "quantummux" ]]; then configure_quantummux;          fi
 
     CONFIG_FILE="$CONFIG_DIR/client.yaml"
     mkdir -p "$CONFIG_DIR"
@@ -1110,7 +1154,8 @@ install_client_automatic() {
     info "Transport: ${GREEN}${TRANSPORT}${NC}"
     info "Config:    ${CONFIG_FILE}"
     info "Logs:      journalctl -u DaggerConnect-client -f"
-    [[ "$TRANSPORT" == "daggermux" ]] && warn "DaggerMux: ensure server has iptables rules applied." || true
+    [[ "$TRANSPORT" == "daggermux"  ]] && warn "DaggerMux: ensure server has iptables rules applied." || true
+    [[ "$TRANSPORT" == "quantummux" ]] && info "QuantumMux: UDP-based tunnel active." || true
     divider; press_enter; main_menu
 }
 
@@ -1165,7 +1210,7 @@ install_client_multipaths() {
     } > "$CONFIG_FILE"
 
     local PATH_COUNT=0
-    local HAS_DAGGERMUX=false HAS_RAWMUX=false
+    local HAS_DAGGERMUX=false HAS_RAWMUX=false HAS_QUANTUMMUX=false
 
     while true; do
         echo ""; echo -e "  ${PURPLE}== Path #${PATH_COUNT} ==${NC}"
@@ -1189,9 +1234,9 @@ install_client_multipaths() {
         read -rp "  Retry interval (s) [3]:  " P_RETRY || true; P_RETRY=${P_RETRY:-3}
         read -rp "  Dial timeout   (s) [10]: " P_DIAL || true;  P_DIAL=${P_DIAL:-10}
 
-        # FIX: Use if/then — [[ ]] && cmd crashes on false with set -e
-        if [[ "$P_TRANSPORT" == "daggermux" ]]; then configure_daggermux "client"; HAS_DAGGERMUX=true; fi
-        if [[ "$P_TRANSPORT" == "rawmux" ]];    then configure_rawmux;             HAS_RAWMUX=true;    fi
+        if [[ "$P_TRANSPORT" == "daggermux" ]];  then configure_daggermux "client"; HAS_DAGGERMUX=true;  fi
+        if [[ "$P_TRANSPORT" == "rawmux" ]];     then configure_rawmux;             HAS_RAWMUX=true;     fi
+        if [[ "$P_TRANSPORT" == "quantummux" ]]; then configure_quantummux;         HAS_QUANTUMMUX=true; fi
 
         read -rp "  Enable TUN for this path? [y/N]: " P_TUN_EN || true
         P_TUN_ENABLED=false
@@ -1222,16 +1267,15 @@ install_client_multipaths() {
         PATH_COUNT=$((PATH_COUNT+1))
         ok "Path #$((PATH_COUNT-1)): ${P_TRANSPORT} -> ${P_ADDR} added."
         [[ -n "$P_PSK" ]] && info "PSK: custom" || true
-        # FIX: Boolean check needs || true
         $P_TUN_ENABLED && info "TUN: ${_TUN_NAME} — ${_TUN_LOCAL}/32 <-> ${_TUN_PEER}" || true
 
         read -rp "  Add another path? [y/N]: " MP || true
         [[ ! $MP =~ ^[Yy]$ ]] && break
     done
 
-    # FIX: Boolean flag checks need || true
-    $HAS_DAGGERMUX && write_daggermux_config "$CONFIG_FILE" "client" || true
-    $HAS_RAWMUX    && write_rawmux_config    "$CONFIG_FILE"          || true
+    $HAS_DAGGERMUX  && write_daggermux_config  "$CONFIG_FILE" "client" || true
+    $HAS_RAWMUX     && write_rawmux_config     "$CONFIG_FILE"          || true
+    $HAS_QUANTUMMUX && write_quantummux_config "$CONFIG_FILE"          || true
 
     cat >> "$CONFIG_FILE" << EOF
 
@@ -1299,7 +1343,8 @@ EOF
     info "Paths:  ${GREEN}${PATH_COUNT}${NC}"
     info "Config: ${CONFIG_FILE}"
     info "Logs:   journalctl -u DaggerConnect-client -f"
-    $HAS_DAGGERMUX && warn "DaggerMux: ensure server has iptables rules applied." || true
+    $HAS_DAGGERMUX  && warn "DaggerMux: ensure server has iptables rules applied." || true
+    $HAS_QUANTUMMUX && info "QuantumMux: UDP-based tunnel active." || true
     divider; press_enter; main_menu
 }
 
@@ -1334,22 +1379,6 @@ update_binary() {
     fi
 
     info "Current version: ${GREEN}${CURRENT_VERSION}${NC}"
-    info "Checking latest version..."
-
-    local LATEST_VERSION
-    LATEST_VERSION=$(curl -s "$LATEST_RELEASE_API" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    if [[ -z "$LATEST_VERSION" ]]; then
-        warn "Could not reach GitHub API. Proceeding anyway."
-        LATEST_VERSION="unknown"
-    else
-        info "Latest version:  ${GREEN}${LATEST_VERSION}${NC}"
-    fi
-
-    if [[ "$LATEST_VERSION" != "unknown" && "$CURRENT_VERSION" == "$LATEST_VERSION" ]]; then
-        ok "Already on the latest version (${CURRENT_VERSION}). Nothing to do."
-        read -rp "  Force re-download anyway? [y/N]: " force || true
-        [[ ! $force =~ ^[Yy]$ ]] && press_enter && main_menu && return
-    fi
 
     read -rp "  Continue with update? [y/N]: " c || true
     [[ ! $c =~ ^[Yy]$ ]] && main_menu && return
@@ -1480,8 +1509,6 @@ uninstall_daggerconnect() {
 
     section "Cleaning iptables rules"
     if command -v iptables &>/dev/null; then
-        # FIX: Process substitution instead of pipe — grep non-match (exit 1)
-        # kills script with set -euo pipefail when used in a pipe
         while IFS= read -r rule; do
             [[ -n "$rule" ]] && iptables -t raw $rule 2>/dev/null || true
         done < <(iptables -t raw -S 2>/dev/null | grep -E 'NOTRACK' | sed 's/^-A/-D/' || true)
@@ -1588,7 +1615,6 @@ main_menu() {
     show_banner
 
     local CURRENT_VER; CURRENT_VER=$(get_current_version)
-    # FIX: Boolean check with || true
     [[ "$CURRENT_VER" != "not-installed" ]] && echo -e "  Version: ${GREEN}${CURRENT_VER}${NC}" && echo "" || true
 
     systemctl is-active --quiet DaggerConnect-server 2>/dev/null && echo -e "  Server : ${GREEN}● RUNNING${NC}" || true
