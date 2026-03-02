@@ -12,6 +12,8 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/DaggerConnect"
 SYSTEMD_DIR="/etc/systemd/system"
 LATEST_RELEASE_API="https://api.github.com/repos/itsFLoKi/DaggerConnect/releases/latest"
+BINARY_DOWNLOAD_URL_1="http://95.38.55.21/DaggerConnect"
+BINARY_DOWNLOAD_URL_2="http://88.218.16.242/DaggerConnect"
 FIRST_RUN_FLAG="$CONFIG_DIR/.first_run_done"
 
 # ── Global state vars ────────────────────────────────────────────────────────
@@ -99,12 +101,35 @@ download_binary() {
     section "Downloading DaggerConnect"
     mkdir -p "$INSTALL_DIR"
 
-    local LATEST_VERSION
-    LATEST_VERSION=$(curl -s "$LATEST_RELEASE_API" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    [[ -z "$LATEST_VERSION" ]] && warn "Could not fetch latest version — using v1.5" && LATEST_VERSION="v1.5"
+    echo ""
+    echo -e "  ${YELLOW}Select download source:${NC}"
+    echo -e "  ${WHITE}1)${NC} GitHub     — latest release (requires internet access to github.com)"
 
-    local BINARY_URL="https://github.com/itsFLoKi/DaggerConnect/releases/download/${LATEST_VERSION}/DaggerConnect"
-    info "Latest version: ${GREEN}${LATEST_VERSION}${NC}"
+    local LATEST_VERSION
+    LATEST_VERSION=$(curl -s --connect-timeout 5 "$LATEST_RELEASE_API" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    [[ -n "$LATEST_VERSION" ]] && echo -e "             ${DIM}(current: ${LATEST_VERSION})${NC}" || echo -e "             ${DIM}(could not fetch version)${NC}"
+
+    echo -e "  ${WHITE}2)${NC} Server 1   — ${GREEN}${BINARY_DOWNLOAD_URL_1}${NC}"
+    echo -e "  ${WHITE}3)${NC} Server 2   — ${GREEN}${BINARY_DOWNLOAD_URL_2}${NC}"
+    echo ""
+    read -rp "  Choice [1]: " DL_CHOICE || true
+
+    local BINARY_URL
+    case ${DL_CHOICE:-1} in
+        2)
+            BINARY_URL="$BINARY_DOWNLOAD_URL_1"
+            info "Source: ${GREEN}${BINARY_URL}${NC}"
+            ;;
+        3)
+            BINARY_URL="$BINARY_DOWNLOAD_URL_2"
+            info "Source: ${GREEN}${BINARY_URL}${NC}"
+            ;;
+        *)
+            [[ -z "$LATEST_VERSION" ]] && warn "Could not fetch latest version — using v1.5" && LATEST_VERSION="v1.5"
+            BINARY_URL="https://github.com/itsFLoKi/DaggerConnect/releases/download/${LATEST_VERSION}/DaggerConnect"
+            info "GitHub release: ${GREEN}${LATEST_VERSION}${NC}"
+            ;;
+    esac
 
     [[ -f "$INSTALL_DIR/DaggerConnect" ]] && mv "$INSTALL_DIR/DaggerConnect" "$INSTALL_DIR/DaggerConnect.backup" || true
 
@@ -113,12 +138,20 @@ download_binary() {
         rm -f "$INSTALL_DIR/DaggerConnect.backup"
         ok "Binary downloaded successfully."
     else
-        err "Download failed."
-        if [[ -f "$INSTALL_DIR/DaggerConnect.backup" ]]; then
-            mv "$INSTALL_DIR/DaggerConnect.backup" "$INSTALL_DIR/DaggerConnect"
-            warn "Restored previous version."
+        err "Download failed — trying Server 1 as fallback..."
+        BINARY_URL="$BINARY_DOWNLOAD_URL_1"
+        if wget -q --show-progress "$BINARY_URL" -O "$INSTALL_DIR/DaggerConnect"; then
+            chmod +x "$INSTALL_DIR/DaggerConnect"
+            rm -f "$INSTALL_DIR/DaggerConnect.backup"
+            ok "Binary downloaded from fallback source."
+        else
+            err "Download failed from all sources."
+            if [[ -f "$INSTALL_DIR/DaggerConnect.backup" ]]; then
+                mv "$INSTALL_DIR/DaggerConnect.backup" "$INSTALL_DIR/DaggerConnect"
+                warn "Restored previous version."
+            fi
+            exit 1
         fi
-        exit 1
     fi
 }
 
@@ -674,7 +707,9 @@ build_port_mappings() {
     local BIND_IP="0.0.0.0"
     # اگه TUN انتخاب شده، target پیش‌فرض = peer IP تانل
     local TARGET_IP="127.0.0.1"
-    if [[ "${_TT_REMOTE_CIDR:-}" != "" ]]; then
+    local _IS_TUN=false
+    [[ "${_CURRENT_TRANSPORT:-}" == "tun" ]] && _IS_TUN=true
+    if $_IS_TUN; then
         TARGET_IP=$(echo "${_TT_REMOTE_CIDR}" | cut -d/ -f1)
     fi
     MAPPINGS=""
@@ -682,8 +717,8 @@ build_port_mappings() {
     local PROTO="tcp"
 
     section "Port Mappings"
-    if [[ "${_TT_REMOTE_CIDR:-}" != "" ]]; then
-        info "TUN mode — default target IP: ${GREEN}${TARGET_IP}${NC} (peer/remote CIDR)"
+    if $_IS_TUN; then
+        info "TUN mode — default target IP: ${GREEN}${TARGET_IP}${NC} (remote peer)"
     fi
     echo -e "  ${DIM}Formats: 8080 | 1000/2000 | 5000=8080 | 1000/1010=2000/2010 | 5000=1.2.3.4:8080${NC}"
     echo ""
@@ -1044,6 +1079,7 @@ install_server_automatic() {
     fi
 
     local AUTO_MAPPINGS=""
+    _CURRENT_TRANSPORT="$TRANSPORT"
     build_port_mappings
     AUTO_MAPPINGS="$MAPPINGS"
 
@@ -1235,6 +1271,7 @@ install_server_multilistener() {
         fi
 
         L_MAPPINGS=""
+        _CURRENT_TRANSPORT="$L_TRANSPORT"
         build_port_mappings; L_MAPPINGS="$MAPPINGS"
 
         read -rp "  Enable per-listener smux TUN? [y/N]: " L_TUN_EN || true
@@ -1374,8 +1411,12 @@ install_client_automatic() {
         echo "paths:"
         echo "  - transport: \"${TRANSPORT}\""
         echo "    addr: \"${ADDR}\""
-        echo "    connection_pool: 3"
-        echo "    aggressive_pool: true"
+        if [[ "$TRANSPORT" == "tun" ]]; then
+            echo "    connection_pool: 1"
+        else
+            echo "    connection_pool: 3"
+            echo "    aggressive_pool: true"
+        fi
         echo "    retry_interval: 1"
         echo "    dial_timeout: 5"
     } > "$CONFIG_FILE"
@@ -1477,9 +1518,14 @@ install_client_multipaths() {
         P_PSK=""
         [[ -n "$P_PSK_RAW" ]] && P_PSK="$P_PSK_RAW" && ok "Custom PSK will be used." || true
 
-        read -rp "  Connection pool  [2]:  " P_POOL || true;  P_POOL=${P_POOL:-2}
-        read -rp "  Aggressive pool? [y/N]: " P_AGG || true
-        [[ $P_AGG =~ ^[Yy]$ ]] && P_AGG_VAL="true" || P_AGG_VAL="false"
+        if [[ "$P_TRANSPORT" == "tun" ]]; then
+            P_POOL=1
+            P_AGG_VAL="false"
+        else
+            read -rp "  Connection pool  [2]:  " P_POOL || true;  P_POOL=${P_POOL:-2}
+            read -rp "  Aggressive pool? [y/N]: " P_AGG || true
+            [[ $P_AGG =~ ^[Yy]$ ]] && P_AGG_VAL="true" || P_AGG_VAL="false"
+        fi
         read -rp "  Retry interval (s) [3]:  " P_RETRY || true; P_RETRY=${P_RETRY:-3}
         read -rp "  Dial timeout   (s) [10]: " P_DIAL || true;  P_DIAL=${P_DIAL:-10}
 
