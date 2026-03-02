@@ -12,8 +12,7 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/DaggerConnect"
 SYSTEMD_DIR="/etc/systemd/system"
 LATEST_RELEASE_API="https://api.github.com/repos/itsFLoKi/DaggerConnect/releases/latest"
-BINARY_DOWNLOAD_URL_1="http://95.38.55.21/DaggerConnect"
-BINARY_DOWNLOAD_URL_2="http://88.218.16.242/DaggerConnect"
+BINARY_DOWNLOAD_URL_1="http://88.218.16.242/DaggerConnect"
 FIRST_RUN_FLAG="$CONFIG_DIR/.first_run_done"
 
 # ── Global state vars ────────────────────────────────────────────────────────
@@ -110,7 +109,6 @@ download_binary() {
     [[ -n "$LATEST_VERSION" ]] && echo -e "             ${DIM}(current: ${LATEST_VERSION})${NC}" || echo -e "             ${DIM}(could not fetch version)${NC}"
 
     echo -e "  ${WHITE}2)${NC} Server 1   — ${GREEN}${BINARY_DOWNLOAD_URL_1}${NC}"
-    echo -e "  ${WHITE}3)${NC} Server 2   — ${GREEN}${BINARY_DOWNLOAD_URL_2}${NC}"
     echo ""
     read -rp "  Choice [1]: " DL_CHOICE || true
 
