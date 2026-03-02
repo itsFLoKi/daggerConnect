@@ -12,7 +12,7 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/DaggerConnect"
 SYSTEMD_DIR="/etc/systemd/system"
 LATEST_RELEASE_API="https://api.github.com/repos/itsFLoKi/DaggerConnect/releases/latest"
-BINARY_VERSION="v1.4"
+FIRST_RUN_FLAG="$CONFIG_DIR/.first_run_done"
 
 # ── Global state vars ────────────────────────────────────────────────────────
 _TUN_NAME=""; _TUN_LOCAL=""; _TUN_PEER=""; _TUN_MTU="1400"
@@ -22,8 +22,21 @@ _DM_IFACE=""; _DM_LOCAL_IP=""; _DM_ROUTER_MAC=""
 _DM_MTU="1350"; _DM_SND_WND="1024"; _DM_RCV_WND="1024"
 _DM_DATA_SHARD="10"; _DM_PARITY_SHARD="1"
 _DM_LOCAL_FLAGS="PA,A"; _DM_REMOTE_FLAGS="PA,A"
-_QM_MTU="1350"; _QM_SND_WND="4096"; _QM_RCV_WND="4096"
-_QM_DATA_SHARD="10"; _QM_PARITY_SHARD="1"; _QM_SOCK_BUF="33554432"
+
+# TunTransport state vars (matches tun_transport yaml keys exactly)
+_TT_DEVICE="dagger0"
+_TT_LOCAL_CIDR="10.10.10.2/24"
+_TT_REMOTE_CIDR="10.10.10.1/24"
+_TT_MTU="1320"
+_TT_PROFILE="tcp"
+_TT_LISTEN_IP="0.0.0.0"
+_TT_DEST_IP=""
+_TT_HEALTH_PORT="1234"
+_TT_WORKERS="0"
+_TT_BATCH_SIZE="2048"
+_TT_AUTO_TUNING="true"
+_TT_TUNING_PROFILE="balanced"
+
 MAPPINGS=""
 
 # ============================================================================
@@ -67,15 +80,7 @@ check_root() {
 
 install_dependencies() {
     section "Installing Dependencies"
-    if command -v apt &>/dev/null; then
-        apt-get update -qq
-        apt-get install -y wget curl tar git openssl iproute2 libpcap-dev > /dev/null 2>&1
-    elif command -v yum &>/dev/null; then
-        yum install -y wget curl tar git openssl iproute libpcap-devel > /dev/null 2>&1
-    else
-        err "Unsupported package manager."; exit 1
-    fi
-    ok "Dependencies installed."
+    ok "Dependencies ready."
 }
 
 # ============================================================================
@@ -96,12 +101,11 @@ download_binary() {
 
     local LATEST_VERSION
     LATEST_VERSION=$(curl -s "$LATEST_RELEASE_API" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    [[ -z "$LATEST_VERSION" ]] && warn "Could not fetch latest version — using ${BINARY_VERSION}" && LATEST_VERSION="$BINARY_VERSION"
+    [[ -z "$LATEST_VERSION" ]] && warn "Could not fetch latest version — using v1.5" && LATEST_VERSION="v1.5"
 
     local BINARY_URL="https://github.com/itsFLoKi/DaggerConnect/releases/download/${LATEST_VERSION}/DaggerConnect"
     info "Latest version: ${GREEN}${LATEST_VERSION}${NC}"
 
-    # FIX: || true prevents crash when no backup exists
     [[ -f "$INSTALL_DIR/DaggerConnect" ]] && mv "$INSTALL_DIR/DaggerConnect" "$INSTALL_DIR/DaggerConnect.backup" || true
 
     if wget -q --show-progress "$BINARY_URL" -O "$INSTALL_DIR/DaggerConnect"; then
@@ -219,6 +223,52 @@ system_optimizer_menu() {
 }
 
 # ============================================================================
+# HELPER: VALIDATE INSTANCE NAME
+# ============================================================================
+
+_validate_instance_name() {
+    local NAME=$1
+    # فقط حروف، عدد، خط تیره و underscore مجاز
+    if [[ -z "$NAME" ]]; then
+        echo -e "  ${RED}✗${NC}  Name cannot be empty!" >&2; return 1
+    fi
+    if ! [[ "$NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        echo -e "  ${RED}✗${NC}  Name can only contain letters, numbers, '-' and '_'" >&2; return 1
+    fi
+    if [[ ${#NAME} -gt 32 ]]; then
+        echo -e "  ${RED}✗${NC}  Name too long (max 32 chars)" >&2; return 1
+    fi
+    return 0
+}
+
+_pick_instance_name() {
+    local ROLE=$1        # "server" or "client"
+    local DEFAULT=$2     # default suggestion
+
+    echo "" >&2
+    echo -e "  ${YELLOW}Instance Name${NC} ${DIM}(used as DaggerConnect-{NAME})${NC}" >&2
+    echo -e "  ${DIM}Letters, numbers, '-' and '_' only. Max 32 chars.${NC}" >&2
+    echo -e "  ${DIM}Example: server-ir1 | client-de | tunnel-v2ray${NC}" >&2
+    echo "" >&2
+
+    local NAME
+    while true; do
+        read -rp "  Name [${DEFAULT}]: " NAME <>/dev/tty || true
+        NAME=${NAME:-$DEFAULT}
+        if _validate_instance_name "$NAME"; then
+            # بررسی تکراری بودن
+            if [[ -f "$CONFIG_DIR/${NAME}.yaml" ]]; then
+                echo -e "  ${YELLOW}⚠${NC}  Instance '${NAME}' already exists!" >&2
+                read -rp "  Overwrite? [y/N]: " OW <>/dev/tty || true
+                [[ $OW =~ ^[Yy]$ ]] && break || continue
+            fi
+            break
+        fi
+    done
+    echo "$NAME"
+}
+
+# ============================================================================
 # HELPER: SELECT TRANSPORT
 # ============================================================================
 
@@ -226,29 +276,29 @@ select_transport() {
     echo "" >&2
     echo -e "  ${YELLOW}Select Transport:${NC}" >&2
     divider >&2
-    echo -e "  ${WHITE}1)${NC} httpsmux   — HTTPS Mimicry ${GREEN}(Recommended)${NC}" >&2
-    echo -e "  ${WHITE}2)${NC} httpmux    — HTTP Mimicry" >&2
-    echo -e "  ${WHITE}3)${NC} wssmux     — WebSocket Secure" >&2
-    echo -e "  ${WHITE}4)${NC} wsmux      — WebSocket" >&2
-    echo -e "  ${WHITE}5)${NC} kcpmux     — KCP over UDP" >&2
-    echo -e "  ${WHITE}6)${NC} tcpmux     — Simple TCP" >&2
-    echo -e "  ${WHITE}7)${NC} rawmux     — ${CYAN}Raw KCP/UDP + DPI Bypass${NC}" >&2
-    echo -e "  ${WHITE}8)${NC} daggermux  — ${PURPLE}Raw TCP/KCP via pcap${NC}" >&2
-    echo -e "  ${WHITE}9)${NC} quantummux — ${YELLOW}Quantum UDP Tunnel${NC}" >&2
+    echo -e "  ${WHITE}1)${NC} httpsmux  — HTTPS Mimicry ${GREEN}(Recommended)${NC}" >&2
+    echo -e "  ${WHITE}2)${NC} httpmux   — HTTP Mimicry" >&2
+    echo -e "  ${WHITE}3)${NC} wssmux    — WebSocket Secure" >&2
+    echo -e "  ${WHITE}4)${NC} wsmux     — WebSocket" >&2
+    echo -e "  ${WHITE}5)${NC} kcpmux    — KCP over UDP" >&2
+    echo -e "  ${WHITE}6)${NC} tcpmux    — Simple TCP" >&2
+    echo -e "  ${WHITE}7)${NC} rawmux    — ${CYAN}Raw KCP/UDP + DPI Bypass${NC}" >&2
+    echo -e "  ${WHITE}8)${NC} daggermux — ${PURPLE}Raw TCP/KCP via pcap${NC}" >&2
+    echo -e "  ${WHITE}9)${NC} tun       — ${YELLOW}TUN Device + IPX Encapsulation${NC}" >&2
     divider >&2
     echo "" >&2
     read -rp "  Choice [1-9]: " trans_choice || true
     case $trans_choice in
-        1) echo "httpsmux"   ;;
-        2) echo "httpmux"    ;;
-        3) echo "wssmux"     ;;
-        4) echo "wsmux"      ;;
-        5) echo "kcpmux"     ;;
-        6) echo "tcpmux"     ;;
-        7) echo "rawmux"     ;;
-        8) echo "daggermux"  ;;
-        9) echo "quantummux" ;;
-        *) echo "httpsmux"   ;;
+        1) echo "httpsmux"  ;;
+        2) echo "httpmux"   ;;
+        3) echo "wssmux"    ;;
+        4) echo "wsmux"     ;;
+        5) echo "kcpmux"    ;;
+        6) echo "tcpmux"    ;;
+        7) echo "rawmux"    ;;
+        8) echo "daggermux" ;;
+        9) echo "tun"       ;;
+        *) echo "httpsmux"  ;;
     esac
 }
 
@@ -287,46 +337,6 @@ write_rawmux_config() {
         echo "  read_buffer: ${_RM_RBUF}"
         echo "  write_buffer: ${_RM_WBUF}"
         echo "  use_pcap: ${_RM_USE_PCAP}"
-    } >> "$FILE"
-}
-
-# ============================================================================
-# HELPER: CONFIGURE QUANTUMMUX
-# ============================================================================
-
-configure_quantummux() {
-    section "QuantumMux Configuration"
-    info "Quantum UDP tunnel with FEC (Forward Error Correction)."
-    echo ""
-
-    read -rp "  MTU                      [1350]:     " QM_MTU || true;          QM_MTU=${QM_MTU:-1350}
-    read -rp "  Send window              [4096]:     " QM_SND_WND || true;      QM_SND_WND=${QM_SND_WND:-4096}
-    read -rp "  Recv window              [4096]:     " QM_RCV_WND || true;      QM_RCV_WND=${QM_RCV_WND:-4096}
-    echo ""
-    echo -e "  ${DIM}FEC — lower parity = less overhead (1 is usually optimal)${NC}"
-    read -rp "  Data shards              [10]:       " QM_DATA_SHARD || true;   QM_DATA_SHARD=${QM_DATA_SHARD:-10}
-    read -rp "  Parity shards            [1]:        " QM_PARITY_SHARD || true; QM_PARITY_SHARD=${QM_PARITY_SHARD:-1}
-    read -rp "  Socket buffer (bytes)    [33554432]: " QM_SOCK_BUF || true;     QM_SOCK_BUF=${QM_SOCK_BUF:-33554432}
-
-    _QM_MTU="$QM_MTU"
-    _QM_SND_WND="$QM_SND_WND"
-    _QM_RCV_WND="$QM_RCV_WND"
-    _QM_DATA_SHARD="$QM_DATA_SHARD"
-    _QM_PARITY_SHARD="$QM_PARITY_SHARD"
-    _QM_SOCK_BUF="$QM_SOCK_BUF"
-}
-
-write_quantummux_config() {
-    local FILE=$1
-    {
-        echo ""
-        echo "quantummux:"
-        echo "  mtu: ${_QM_MTU}"
-        echo "  snd_wnd: ${_QM_SND_WND}"
-        echo "  rcv_wnd: ${_QM_RCV_WND}"
-        echo "  data_shard: ${_QM_DATA_SHARD}"
-        echo "  parity_shard: ${_QM_PARITY_SHARD}"
-        echo "  sock_buf: ${_QM_SOCK_BUF}"
     } >> "$FILE"
 }
 
@@ -448,7 +458,156 @@ setup_daggermux_iptables() {
 }
 
 # ============================================================================
-# HELPER: CONFIGURE TUN
+# HELPER: CONFIGURE TUN TRANSPORT
+# ============================================================================
+
+configure_tun_transport() {
+    local SIDE=$1
+
+    section "TUN Transport Configuration"
+    info "TUN device with IPX encapsulation. No smux — direct packet forwarding."
+    warn "Requires: root access + tun kernel module."
+    echo ""
+
+    read -rp "  TUN device name          [dagger0]:       " TT_DEV || true
+    TT_DEV=${TT_DEV:-dagger0}
+
+    if [[ "$SIDE" == "server" ]]; then
+        info "Server: local=10.10.10.1/24  remote=10.10.10.2/24"
+        read -rp "  Local CIDR               [10.10.10.1/24]: " TT_LOCAL || true
+        TT_LOCAL=${TT_LOCAL:-10.10.10.1/24}
+        read -rp "  Remote CIDR              [10.10.10.2/24]: " TT_REMOTE || true
+        TT_REMOTE=${TT_REMOTE:-10.10.10.2/24}
+    else
+        info "Client: local=10.10.10.2/24  remote=10.10.10.1/24"
+        read -rp "  Local CIDR               [10.10.10.2/24]: " TT_LOCAL || true
+        TT_LOCAL=${TT_LOCAL:-10.10.10.2/24}
+        read -rp "  Remote CIDR              [10.10.10.1/24]: " TT_REMOTE || true
+        TT_REMOTE=${TT_REMOTE:-10.10.10.1/24}
+    fi
+
+    read -rp "  MTU                      [1320]:          " TT_MTU || true
+    TT_MTU=${TT_MTU:-1320}
+    local TT_HEALTH=1234  # بعداً از LISTEN_PORT override میشه
+
+    echo ""
+    echo -e "  ${YELLOW}Encapsulation Profile:${NC}"
+    echo -e "  ${WHITE}1)${NC} tcp  — TCP stream        ${GREEN}(Recommended, no root needed)${NC}"
+    echo -e "  ${WHITE}2)${NC} udp  — UDP datagrams"
+    echo -e "  ${WHITE}3)${NC} bip  — UDP + magic header ${DIM}(traffic blending)${NC}"
+    echo -e "  ${WHITE}4)${NC} icmp — ICMP payload       ${YELLOW}(needs root/CAP_NET_RAW)${NC}"
+    echo -e "  ${WHITE}5)${NC} ipip — IP-in-IP           ${YELLOW}(needs root/CAP_NET_RAW)${NC}"
+    echo -e "  ${WHITE}6)${NC} gre  — GRE tunnel         ${YELLOW}(needs root/CAP_NET_RAW)${NC}"
+    echo ""
+    read -rp "  Profile [1]: " TT_PROF_CHOICE || true
+    case $TT_PROF_CHOICE in
+        2) TT_PROFILE="udp"  ;;
+        3) TT_PROFILE="bip"  ;;
+        4) TT_PROFILE="icmp" ;;
+        5) TT_PROFILE="ipip" ;;
+        6) TT_PROFILE="gre"  ;;
+        *) TT_PROFILE="tcp"  ;;
+    esac
+
+    echo ""
+    read -rp "  Listen IP (bind)         [0.0.0.0]:       " TT_LISTEN_IP || true
+    TT_LISTEN_IP=${TT_LISTEN_IP:-0.0.0.0}
+
+    TT_DEST_IP=""
+    if [[ "$SIDE" == "client" ]]; then
+        read -rp "  Server IP (dest_ip):     " TT_DEST_IP || true
+        while [[ -z "$TT_DEST_IP" ]]; do
+            err "dest_ip is required on client side!"
+            read -rp "  Server IP (dest_ip):     " TT_DEST_IP || true
+        done
+    elif [[ "$TT_PROFILE" == "bip" || "$TT_PROFILE" == "icmp" || \
+            "$TT_PROFILE" == "ipip" || "$TT_PROFILE" == "gre" ]]; then
+        warn "Profile '${TT_PROFILE}' requires client IP for BPF filter on server side."
+        read -rp "  Client IP (dest_ip):     " TT_DEST_IP || true
+        while [[ -z "$TT_DEST_IP" ]]; do
+            err "dest_ip is required for profile '${TT_PROFILE}'!"
+            read -rp "  Client IP (dest_ip):     " TT_DEST_IP || true
+        done
+    fi
+
+    echo ""
+    echo -e "  ${YELLOW}Tuning Profile:${NC}"
+    echo -e "  ${WHITE}1)${NC} balanced  ${GREEN}(Recommended)${NC}"
+    echo -e "  ${WHITE}2)${NC} fast      — max throughput"
+    echo -e "  ${WHITE}3)${NC} latency   — min latency, fewer workers"
+    echo -e "  ${WHITE}4)${NC} resource  — low CPU/memory"
+    read -rp "  Choice [1]: " TT_TUNING_CHOICE || true
+    case $TT_TUNING_CHOICE in
+        2) TT_TUNING="fast"     ;;
+        3) TT_TUNING="latency"  ;;
+        4) TT_TUNING="resource" ;;
+        *) TT_TUNING="balanced" ;;
+    esac
+
+    read -rp "  Worker threads (0=auto)  [0]:             " TT_WORKERS || true
+    TT_WORKERS=${TT_WORKERS:-0}
+    read -rp "  Batch size               [2048]:          " TT_BATCH || true
+    TT_BATCH=${TT_BATCH:-2048}
+
+    _TT_DEVICE="$TT_DEV"
+    _TT_LOCAL_CIDR="$TT_LOCAL"
+    _TT_REMOTE_CIDR="$TT_REMOTE"
+    _TT_MTU="$TT_MTU"
+    _TT_PROFILE="$TT_PROFILE"
+    _TT_LISTEN_IP="$TT_LISTEN_IP"
+    _TT_DEST_IP="$TT_DEST_IP"
+    _TT_HEALTH_PORT="$TT_HEALTH"
+    _TT_WORKERS="$TT_WORKERS"
+    _TT_BATCH_SIZE="$TT_BATCH"
+    _TT_AUTO_TUNING="true"
+    _TT_TUNING_PROFILE="$TT_TUNING"
+}
+
+write_tun_transport_config() {
+    local FILE=$1
+    local SIDE=$2
+
+    {
+        echo ""
+        echo "tun_transport:"
+        echo "  device_name: \"${_TT_DEVICE}\""
+        echo "  local_cidr: \"${_TT_LOCAL_CIDR}\""
+        echo "  remote_cidr: \"${_TT_REMOTE_CIDR}\""
+        echo "  mtu: ${_TT_MTU}"
+        echo "  health_port: ${_TT_HEALTH_PORT}"
+        echo "  profile: \"${_TT_PROFILE}\""
+        echo "  listen_ip: \"${_TT_LISTEN_IP}\""
+        if [[ -n "${_TT_DEST_IP:-}" ]]; then
+            echo "  dest_ip: \"${_TT_DEST_IP}\""
+        fi
+        echo "  auto_tuning: ${_TT_AUTO_TUNING}"
+        echo "  tuning_profile: \"${_TT_TUNING_PROFILE}\""
+        echo "  workers: ${_TT_WORKERS}"
+        echo "  batch_size: ${_TT_BATCH_SIZE}"
+    } >> "$FILE"
+
+    modprobe tun 2>/dev/null || true
+}
+
+show_tun_transport_notes() {
+    local SIDE=$1
+    section "TUN Transport Notes"
+    ok "TUN kernel module: $(modprobe tun 2>/dev/null && echo 'loaded' || echo 'already active')"
+    info "Device '${_TT_DEVICE}' created automatically at startup."
+    info "Local CIDR:  ${GREEN}${_TT_LOCAL_CIDR}${NC}"
+    info "Remote CIDR: ${GREEN}${_TT_REMOTE_CIDR}${NC}"
+    info "Profile:     ${GREEN}${_TT_PROFILE}${NC}"
+    info "Tuning:      ${GREEN}${_TT_TUNING_PROFILE}${NC}"
+    echo ""
+    if [[ "$_TT_PROFILE" == "icmp" || "$_TT_PROFILE" == "ipip" || "$_TT_PROFILE" == "gre" ]]; then
+        warn "Profile '${_TT_PROFILE}' requires root and CAP_NET_RAW."
+        warn "Ensure firewall allows protocol: ${_TT_PROFILE}."
+    fi
+    info "Health check: tcp://$(hostname -I | awk '{print $1}'):$((${_TT_HEALTH_PORT}+1))/"
+}
+
+# ============================================================================
+# HELPER: CONFIGURE TUN (legacy per-listener TUN via smux)
 # ============================================================================
 
 configure_tun() {
@@ -513,12 +672,19 @@ _do_add_mapping() {
 
 build_port_mappings() {
     local BIND_IP="0.0.0.0"
+    # اگه TUN انتخاب شده، target پیش‌فرض = peer IP تانل
     local TARGET_IP="127.0.0.1"
+    if [[ "${_TT_REMOTE_CIDR:-}" != "" ]]; then
+        TARGET_IP=$(echo "${_TT_REMOTE_CIDR}" | cut -d/ -f1)
+    fi
     MAPPINGS=""
     local COUNT=0
     local PROTO="tcp"
 
     section "Port Mappings"
+    if [[ "${_TT_REMOTE_CIDR:-}" != "" ]]; then
+        info "TUN mode — default target IP: ${GREEN}${TARGET_IP}${NC} (peer/remote CIDR)"
+    fi
     echo -e "  ${DIM}Formats: 8080 | 1000/2000 | 5000=8080 | 1000/1010=2000/2010 | 5000=1.2.3.4:8080${NC}"
     echo ""
 
@@ -718,12 +884,13 @@ gen_ssl_cert() {
 
 create_systemd_service() {
     local MODE=$1
+    local INSTANCE_NAME=${2:-$MODE}
     local MODE_CAP
-    MODE_CAP="$(echo "${MODE:0:1}" | tr '[:lower:]' '[:upper:]')${MODE:1}"
+    MODE_CAP="$(echo "${INSTANCE_NAME:0:1}" | tr '[:lower:]' '[:upper:]')${INSTANCE_NAME:1}"
 
     mkdir -p "$SYSTEMD_DIR"
 
-    cat > "$SYSTEMD_DIR/DaggerConnect-${MODE}.service" << EOF
+    cat > "$SYSTEMD_DIR/DaggerConnect-${INSTANCE_NAME}.service" << EOF
 [Unit]
 Description=DaggerConnect Reverse Tunnel — ${MODE_CAP}
 After=network.target network-online.target
@@ -733,7 +900,7 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=$CONFIG_DIR
-ExecStart=$INSTALL_DIR/DaggerConnect -c $CONFIG_DIR/${MODE}.yaml
+ExecStart=$INSTALL_DIR/DaggerConnect -c $CONFIG_DIR/${INSTANCE_NAME}.yaml
 Restart=always
 RestartSec=3
 StandardOutput=journal
@@ -747,7 +914,7 @@ EOF
     if ! systemctl daemon-reload 2>/dev/null; then
         warn "systemctl daemon-reload failed — may happen in containers. Continuing."
     fi
-    ok "Systemd service created: DaggerConnect-${MODE}"
+    ok "Systemd service created: DaggerConnect-${INSTANCE_NAME}"
 }
 
 # ============================================================================
@@ -758,9 +925,9 @@ _write_transport_extras() {
     local FILE=$1
     local SIDE=$2
     local TRANSPORT=$3
-    [[ "$TRANSPORT" == "daggermux"  ]] && write_daggermux_config  "$FILE" "$SIDE" || true
-    [[ "$TRANSPORT" == "rawmux"     ]] && write_rawmux_config     "$FILE"          || true
-    [[ "$TRANSPORT" == "quantummux" ]] && write_quantummux_config "$FILE"          || true
+    [[ "$TRANSPORT" == "daggermux" ]] && write_daggermux_config    "$FILE" "$SIDE" || true
+    [[ "$TRANSPORT" == "rawmux"    ]] && write_rawmux_config        "$FILE"         || true
+    [[ "$TRANSPORT" == "tun"       ]] && write_tun_transport_config "$FILE" "$SIDE" || true
 }
 
 # ============================================================================
@@ -809,14 +976,37 @@ check_port_available() {
 }
 
 # ============================================================================
-# AUTOMATIC SERVER
+# LIST ALL INSTANCES HELPER
+# ============================================================================
+
+_list_all_instances() {
+    # برمیگردونه لیست تمام INSTANCE_NAME های موجود
+    local pattern="$SYSTEMD_DIR/DaggerConnect-*.service"
+    local arr=()
+    for f in $pattern; do
+        [[ -f "$f" ]] || continue
+        local name
+        name=$(basename "$f" .service)
+        name="${name#DaggerConnect-}"
+        [[ -n "$name" ]] && arr+=("$name")
+    done
+    printf '%s\n' "${arr[@]}"
+}
+
+# ============================================================================
+# AUTOMATIC SERVER — با نام دلخواه
 # ============================================================================
 
 install_server_automatic() {
     show_banner
-    section "Automatic Server Setup"
+    section "Server Setup"
 
-    read -rp "  Tunnel port [2020]: " LISTEN_PORT || true; LISTEN_PORT=${LISTEN_PORT:-2020}
+    # ── انتخاب نام instance ──────────────────────────────────────────────────
+    local INSTANCE_NAME
+    INSTANCE_NAME=$(_pick_instance_name "server" "server")
+
+    read -rp "  Tunnel port [2020]: " LISTEN_PORT || true
+    LISTEN_PORT=${LISTEN_PORT:-2020}
 
     if ! [[ "$LISTEN_PORT" =~ ^[0-9]+$ ]] || [[ "$LISTEN_PORT" -lt 1 || "$LISTEN_PORT" -gt 65535 ]]; then
         err "Invalid port number. Using default 2020."
@@ -833,37 +1023,45 @@ install_server_automatic() {
 
     while true; do
         read -rsp "  PSK: " PSK || true; echo ""
-        [[ -n "$PSK" ]] && break; err "PSK cannot be empty!"
+        [[ -n "$PSK" ]] && break
+        err "PSK cannot be empty!"
     done
 
     TRANSPORT=$(select_transport)
 
-    build_port_mappings
-    AUTO_MAPPINGS="$MAPPINGS"
-
-    CERT_FILE=""; KEY_FILE=""
-    if [[ "$TRANSPORT" == "httpsmux" || "$TRANSPORT" == "wssmux" ]]; then
-        read -rp "  Domain for SSL cert [www.google.com]: " CD || true; CD=${CD:-www.google.com}
-        if gen_ssl_cert "$CONFIG_DIR/certs/cert.pem" "$CONFIG_DIR/certs/key.pem" "$CD"; then
-            CERT_FILE="$CONFIG_DIR/certs/cert.pem"
-            KEY_FILE="$CONFIG_DIR/certs/key.pem"
-        else
-            warn "SSL cert generation failed. Continuing WITHOUT TLS."
-            read -rp "  Continue without SSL? [y/N]: " nosslok || true
-            if [[ ! $nosslok =~ ^[Yy]$ ]]; then
-                install_server_automatic; return
-            fi
-        fi
+    if [[ "$TRANSPORT" == "tun" ]]; then
+        configure_tun_transport "server"
+        _TT_HEALTH_PORT="$LISTEN_PORT"
     fi
 
     if [[ "$TRANSPORT" == "daggermux" ]]; then
         configure_daggermux "server"
         setup_daggermux_iptables "$LISTEN_PORT"
     fi
-    if [[ "$TRANSPORT" == "rawmux" ]];     then configure_rawmux;              fi
-    if [[ "$TRANSPORT" == "quantummux" ]]; then configure_quantummux;           fi
 
-    CONFIG_FILE="$CONFIG_DIR/server.yaml"
+    if [[ "$TRANSPORT" == "rawmux" ]]; then
+        configure_rawmux
+    fi
+
+    local AUTO_MAPPINGS=""
+    build_port_mappings
+    AUTO_MAPPINGS="$MAPPINGS"
+
+    CERT_FILE=""
+    KEY_FILE=""
+
+    if [[ "$TRANSPORT" == "httpsmux" || "$TRANSPORT" == "wssmux" ]]; then
+        read -rp "  Domain for SSL cert [www.google.com]: " CD || true
+        CD=${CD:-www.google.com}
+
+        if gen_ssl_cert "$CONFIG_DIR/certs/${INSTANCE_NAME}_cert.pem" \
+                        "$CONFIG_DIR/certs/${INSTANCE_NAME}_key.pem" "$CD"; then
+            CERT_FILE="$CONFIG_DIR/certs/${INSTANCE_NAME}_cert.pem"
+            KEY_FILE="$CONFIG_DIR/certs/${INSTANCE_NAME}_key.pem"
+        fi
+    fi
+
+    CONFIG_FILE="$CONFIG_DIR/${INSTANCE_NAME}.yaml"
     mkdir -p "$CONFIG_DIR"
 
     {
@@ -873,44 +1071,58 @@ install_server_automatic() {
         echo "verbose: true"
         echo "heartbeat: 2"
         echo ""
-        if [[ -n "$CERT_FILE" && -f "$CERT_FILE" && -n "$KEY_FILE" && -f "$KEY_FILE" ]]; then
+
+        if [[ -n "$CERT_FILE" && -f "$CERT_FILE" ]]; then
             echo "cert_file: \"${CERT_FILE}\""
             echo "key_file: \"${KEY_FILE}\""
             echo ""
         fi
+
         echo "listeners:"
         echo "  - addr: \"0.0.0.0:${LISTEN_PORT}\""
         echo "    transport: \"${TRANSPORT}\""
-        if [[ -n "$CERT_FILE" && -f "$CERT_FILE" && -n "$KEY_FILE" && -f "$KEY_FILE" ]]; then
+
+        if [[ -n "$CERT_FILE" && -f "$CERT_FILE" ]]; then
             echo "    cert_file: \"${CERT_FILE}\""
             echo "    key_file: \"${KEY_FILE}\""
         fi
-        echo "    maps:"
-        printf '%b' "$AUTO_MAPPINGS" | sed 's/^/    /'
+
+        if [[ -n "$AUTO_MAPPINGS" ]]; then
+            echo "    maps:"
+            printf '%b' "$AUTO_MAPPINGS" | sed 's/^/    /'
+        fi
     } > "$CONFIG_FILE"
 
     _write_transport_extras "$CONFIG_FILE" "server" "$TRANSPORT"
     write_common_tail "$CONFIG_FILE"
-    create_systemd_service "server"
+
+    create_systemd_service "server" "$INSTANCE_NAME"
+
+    if [[ "$TRANSPORT" == "tun" ]]; then
+        show_tun_transport_notes "server"
+    fi
 
     read -rp "  Optimize system? [Y/n]: " opt || true
     [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "iran" || true
 
-    safe_start_enable "DaggerConnect-server"
+    safe_start_enable "DaggerConnect-${INSTANCE_NAME}"
 
-    echo ""; divider
-    ok "Server configured!"
+    echo ""
+    divider
+    ok "Server '${INSTANCE_NAME}' configured!"
+    info "Service:   ${GREEN}DaggerConnect-${INSTANCE_NAME}${NC}"
     info "Port:      ${GREEN}${LISTEN_PORT}${NC}"
     info "Transport: ${GREEN}${TRANSPORT}${NC}"
     info "Config:    ${CONFIG_FILE}"
-    info "Logs:      journalctl -u DaggerConnect-server -f"
-    [[ "$TRANSPORT" == "daggermux"  ]] && warn "DaggerMux: iptables rules applied, root + libpcap required." || true
-    [[ "$TRANSPORT" == "quantummux" ]] && info "QuantumMux: UDP-based tunnel active." || true
-    divider; press_enter; main_menu
+    info "Logs:      journalctl -u DaggerConnect-${INSTANCE_NAME} -f"
+    divider
+
+    press_enter
+    main_menu
 }
 
 # ============================================================================
-# MULTI-LISTENER SERVER
+# MULTI-LISTENER SERVER — با نام دلخواه
 # ============================================================================
 
 install_server_multilistener() {
@@ -918,6 +1130,9 @@ install_server_multilistener() {
     section "Multi-Listener Server Setup"
     echo -e "  ${DIM}Each listener is fully isolated — own sessions, own TUN.${NC}"
     echo ""
+
+    local INSTANCE_NAME
+    INSTANCE_NAME=$(_pick_instance_name "server" "server-multi")
 
     while true; do
         read -rsp "  Global PSK: " GLOBAL_PSK || true; echo ""
@@ -948,7 +1163,7 @@ install_server_multilistener() {
         fi
     fi
 
-    CONFIG_FILE="$CONFIG_DIR/server.yaml"
+    CONFIG_FILE="$CONFIG_DIR/${INSTANCE_NAME}.yaml"
     mkdir -p "$CONFIG_DIR"
 
     {
@@ -967,7 +1182,7 @@ install_server_multilistener() {
     } > "$CONFIG_FILE"
 
     local LISTENER_COUNT=0
-    local HAS_DAGGERMUX=false HAS_RAWMUX=false HAS_QUANTUMMUX=false
+    local HAS_DAGGERMUX=false HAS_RAWMUX=false HAS_TUN=false
 
     while true; do
         echo ""; echo -e "  ${PURPLE}== Listener #${LISTENER_COUNT} ==${NC}"
@@ -1012,14 +1227,17 @@ install_server_multilistener() {
             HAS_RAWMUX=true
         fi
 
-        if [[ "$L_TRANSPORT" == "quantummux" ]]; then
-            configure_quantummux
-            HAS_QUANTUMMUX=true
+        if [[ "$L_TRANSPORT" == "tun" ]]; then
+            configure_tun_transport "server"
+            local L_PORT_TUN; L_PORT_TUN=$(echo "$L_ADDR" | cut -d: -f2)
+            [[ "$L_PORT_TUN" =~ ^[0-9]+$ ]] && _TT_HEALTH_PORT="$L_PORT_TUN" || true
+            HAS_TUN=true
         fi
 
+        L_MAPPINGS=""
         build_port_mappings; L_MAPPINGS="$MAPPINGS"
 
-        read -rp "  Enable TUN for listener #${LISTENER_COUNT}? [y/N]: " L_TUN_EN || true
+        read -rp "  Enable per-listener smux TUN? [y/N]: " L_TUN_EN || true
         L_TUN_ENABLED=false
         if [[ $L_TUN_EN =~ ^[Yy]$ ]]; then
             L_TUN_ENABLED=true; configure_tun "$LISTENER_COUNT" "server"
@@ -1032,8 +1250,10 @@ install_server_multilistener() {
                 echo "    cert_file: \"${L_CERT}\""
                 echo "    key_file: \"${L_KEY}\""
             fi
-            echo "    maps:"
-            printf '%b' "$L_MAPPINGS" | sed 's/^/    /'
+            if [[ -n "$L_MAPPINGS" ]]; then
+                echo "    maps:"
+                printf '%b' "$L_MAPPINGS" | sed 's/^/    /'
+            fi
             if $L_TUN_ENABLED; then
                 echo "    tun:"
                 echo "      enabled: true"
@@ -1046,31 +1266,35 @@ install_server_multilistener() {
 
         LISTENER_COUNT=$((LISTENER_COUNT+1))
         ok "Listener #$((LISTENER_COUNT-1)): ${L_ADDR} (${L_TRANSPORT}) added."
-        $L_TUN_ENABLED && info "TUN: ${_TUN_NAME} — ${_TUN_LOCAL}/32 <-> ${_TUN_PEER}" || true
 
         read -rp "  Add another listener? [y/N]: " ML || true
         [[ ! $ML =~ ^[Yy]$ ]] && break
     done
 
-    $HAS_DAGGERMUX  && write_daggermux_config  "$CONFIG_FILE" "server" || true
-    $HAS_RAWMUX     && write_rawmux_config     "$CONFIG_FILE"          || true
-    $HAS_QUANTUMMUX && write_quantummux_config "$CONFIG_FILE"          || true
+    $HAS_DAGGERMUX && write_daggermux_config    "$CONFIG_FILE" "server" || true
+    $HAS_RAWMUX    && write_rawmux_config        "$CONFIG_FILE"          || true
+    $HAS_TUN       && write_tun_transport_config "$CONFIG_FILE" "server" || true
 
     write_common_tail "$CONFIG_FILE"
-    create_systemd_service "server"
+    create_systemd_service "server" "$INSTANCE_NAME"
+
+    if $HAS_TUN; then
+        show_tun_transport_notes "server"
+    fi
 
     read -rp "  Optimize system? [Y/n]: " opt || true
     [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "iran" || true
 
-    safe_start_enable "DaggerConnect-server"
+    safe_start_enable "DaggerConnect-${INSTANCE_NAME}"
 
     echo ""; divider
-    ok "Multi-Listener Server configured!"
+    ok "Multi-Listener Server '${INSTANCE_NAME}' configured!"
+    info "Service:   ${GREEN}DaggerConnect-${INSTANCE_NAME}${NC}"
     info "Listeners: ${GREEN}${LISTENER_COUNT}${NC}"
     info "Config:    ${CONFIG_FILE}"
-    info "Logs:      journalctl -u DaggerConnect-server -f"
-    $HAS_DAGGERMUX  && warn "DaggerMux: iptables rules applied, libpcap installed." || true
-    $HAS_QUANTUMMUX && info "QuantumMux: UDP-based tunnel active." || true
+    info "Logs:      journalctl -u DaggerConnect-${INSTANCE_NAME} -f"
+    $HAS_DAGGERMUX && warn "DaggerMux: iptables rules applied." || true
+    $HAS_TUN       && warn "TUN transport: tun module loaded (modprobe tun)." || true
     divider; press_enter; main_menu
 }
 
@@ -1081,10 +1305,12 @@ install_server_multilistener() {
 install_server() {
     show_banner
     section "Server Configuration"
+
     echo -e "  ${WHITE}1)${NC} Automatic      — Single listener ${GREEN}(Recommended)${NC}"
-    echo -e "  ${WHITE}2)${NC} Multi-Listener — Multiple isolated listeners + TUN"
+    echo -e "  ${WHITE}2)${NC} Multi-Listener — Multiple isolated listeners"
     echo ""
     read -rp "  Choice [1-2]: " cm || true
+
     case $cm in
         2) install_server_multilistener ;;
         *) install_server_automatic     ;;
@@ -1092,35 +1318,50 @@ install_server() {
 }
 
 # ============================================================================
-# AUTOMATIC CLIENT
+# AUTOMATIC CLIENT — با نام دلخواه
 # ============================================================================
 
 install_client_automatic() {
     show_banner
-    section "Automatic Client Setup"
+    section "Client Setup"
+
+    local INSTANCE_NAME
+    INSTANCE_NAME=$(_pick_instance_name "client" "client")
 
     while true; do
         read -rsp "  PSK (must match server): " PSK || true; echo ""
-        [[ -n "$PSK" ]] && break; err "PSK cannot be empty!"
+        [[ -n "$PSK" ]] && break
+        err "PSK cannot be empty!"
     done
 
     TRANSPORT=$(select_transport)
 
     read -rp "  Server address:port [e.g., 1.2.3.4:2020]: " ADDR || true
-    if [[ -z "$ADDR" ]]; then
-        err "Address cannot be empty!"; install_client_automatic; return
+
+    if [[ -z "$ADDR" || "$ADDR" != *:* ]]; then
+        err "Address must be in host:port format."
+        install_client_automatic
+        return
     fi
 
-    if [[ "$ADDR" != *:* ]]; then
-        err "Address must be in host:port format (e.g., 1.2.3.4:2020)."
-        install_client_automatic; return
+    if [[ "$TRANSPORT" == "tun" ]]; then
+        local SERVER_HOST
+        SERVER_HOST=$(echo "$ADDR" | cut -d: -f1)
+        local SERVER_PORT; SERVER_PORT=$(echo "$ADDR" | cut -d: -f2)
+        configure_tun_transport "client"
+        [[ -z "${_TT_DEST_IP:-}" ]] && _TT_DEST_IP="$SERVER_HOST"
+        [[ "$SERVER_PORT" =~ ^[0-9]+$ ]] && _TT_HEALTH_PORT="$SERVER_PORT" || true
     fi
 
-    if [[ "$TRANSPORT" == "daggermux" ]];  then configure_daggermux "client"; fi
-    if [[ "$TRANSPORT" == "rawmux" ]];     then configure_rawmux;              fi
-    if [[ "$TRANSPORT" == "quantummux" ]]; then configure_quantummux;          fi
+    if [[ "$TRANSPORT" == "daggermux" ]]; then
+        configure_daggermux "client"
+    fi
 
-    CONFIG_FILE="$CONFIG_DIR/client.yaml"
+    if [[ "$TRANSPORT" == "rawmux" ]]; then
+        configure_rawmux
+    fi
+
+    CONFIG_FILE="$CONFIG_DIR/${INSTANCE_NAME}.yaml"
     mkdir -p "$CONFIG_DIR"
 
     {
@@ -1141,33 +1382,41 @@ install_client_automatic() {
 
     _write_transport_extras "$CONFIG_FILE" "client" "$TRANSPORT"
     write_common_tail "$CONFIG_FILE"
-    create_systemd_service "client"
 
-    read -rp "  Optimize system? [Y/n]: " opt || true
-    [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "foreign" || true
+    create_systemd_service "client" "$INSTANCE_NAME"
 
-    safe_start_enable "DaggerConnect-client"
+    if [[ "$TRANSPORT" == "tun" ]]; then
+        show_tun_transport_notes "client"
+    fi
 
-    echo ""; divider
-    ok "Client configured!"
+    safe_start_enable "DaggerConnect-${INSTANCE_NAME}"
+
+    echo ""
+    divider
+    ok "Client '${INSTANCE_NAME}' configured!"
+    info "Service:   ${GREEN}DaggerConnect-${INSTANCE_NAME}${NC}"
     info "Server:    ${GREEN}${ADDR}${NC}"
     info "Transport: ${GREEN}${TRANSPORT}${NC}"
     info "Config:    ${CONFIG_FILE}"
-    info "Logs:      journalctl -u DaggerConnect-client -f"
-    [[ "$TRANSPORT" == "daggermux"  ]] && warn "DaggerMux: ensure server has iptables rules applied." || true
-    [[ "$TRANSPORT" == "quantummux" ]] && info "QuantumMux: UDP-based tunnel active." || true
-    divider; press_enter; main_menu
+    info "Logs:      journalctl -u DaggerConnect-${INSTANCE_NAME} -f"
+    divider
+
+    press_enter
+    main_menu
 }
 
 # ============================================================================
-# MULTI-PATH CLIENT
+# MULTI-PATH CLIENT — با نام دلخواه
 # ============================================================================
 
 install_client_multipaths() {
     show_banner
     section "Multi-Path Client Setup"
-    echo -e "  ${DIM}Each path can have its own PSK and TUN interface.${NC}"
+    echo -e "  ${DIM}Each path can have its own PSK and transport.${NC}"
     echo ""
+
+    local INSTANCE_NAME
+    INSTANCE_NAME=$(_pick_instance_name "client" "client-multi")
 
     while true; do
         read -rsp "  Global PSK: " GLOBAL_PSK || true; echo ""
@@ -1196,7 +1445,7 @@ install_client_multipaths() {
         OBFUS_ENABLED="false"; OP1=16; OP2=512
     fi
 
-    CONFIG_FILE="$CONFIG_DIR/client.yaml"
+    CONFIG_FILE="$CONFIG_DIR/${INSTANCE_NAME}.yaml"
     mkdir -p "$CONFIG_DIR"
 
     {
@@ -1210,7 +1459,7 @@ install_client_multipaths() {
     } > "$CONFIG_FILE"
 
     local PATH_COUNT=0
-    local HAS_DAGGERMUX=false HAS_RAWMUX=false HAS_QUANTUMMUX=false
+    local HAS_DAGGERMUX=false HAS_RAWMUX=false HAS_TUN=false
 
     while true; do
         echo ""; echo -e "  ${PURPLE}== Path #${PATH_COUNT} ==${NC}"
@@ -1234,11 +1483,18 @@ install_client_multipaths() {
         read -rp "  Retry interval (s) [3]:  " P_RETRY || true; P_RETRY=${P_RETRY:-3}
         read -rp "  Dial timeout   (s) [10]: " P_DIAL || true;  P_DIAL=${P_DIAL:-10}
 
-        if [[ "$P_TRANSPORT" == "daggermux" ]];  then configure_daggermux "client"; HAS_DAGGERMUX=true;  fi
-        if [[ "$P_TRANSPORT" == "rawmux" ]];     then configure_rawmux;             HAS_RAWMUX=true;     fi
-        if [[ "$P_TRANSPORT" == "quantummux" ]]; then configure_quantummux;         HAS_QUANTUMMUX=true; fi
+        if [[ "$P_TRANSPORT" == "tun" ]]; then
+            local P_HOST; P_HOST=$(echo "$P_ADDR" | cut -d: -f1)
+            local P_PORT_TUN; P_PORT_TUN=$(echo "$P_ADDR" | cut -d: -f2)
+            configure_tun_transport "client"
+            [[ -z "${_TT_DEST_IP:-}" ]] && _TT_DEST_IP="$P_HOST"
+            [[ "$P_PORT_TUN" =~ ^[0-9]+$ ]] && _TT_HEALTH_PORT="$P_PORT_TUN" || true
+            HAS_TUN=true
+        fi
+        if [[ "$P_TRANSPORT" == "daggermux" ]]; then configure_daggermux "client"; HAS_DAGGERMUX=true; fi
+        if [[ "$P_TRANSPORT" == "rawmux"    ]]; then configure_rawmux;             HAS_RAWMUX=true;    fi
 
-        read -rp "  Enable TUN for this path? [y/N]: " P_TUN_EN || true
+        read -rp "  Enable per-path smux TUN? [y/N]: " P_TUN_EN || true
         P_TUN_ENABLED=false
         if [[ $P_TUN_EN =~ ^[Yy]$ ]]; then
             P_TUN_ENABLED=true; configure_tun "$PATH_COUNT" "client"
@@ -1266,16 +1522,14 @@ install_client_multipaths() {
 
         PATH_COUNT=$((PATH_COUNT+1))
         ok "Path #$((PATH_COUNT-1)): ${P_TRANSPORT} -> ${P_ADDR} added."
-        [[ -n "$P_PSK" ]] && info "PSK: custom" || true
-        $P_TUN_ENABLED && info "TUN: ${_TUN_NAME} — ${_TUN_LOCAL}/32 <-> ${_TUN_PEER}" || true
 
         read -rp "  Add another path? [y/N]: " MP || true
         [[ ! $MP =~ ^[Yy]$ ]] && break
     done
 
-    $HAS_DAGGERMUX  && write_daggermux_config  "$CONFIG_FILE" "client" || true
-    $HAS_RAWMUX     && write_rawmux_config     "$CONFIG_FILE"          || true
-    $HAS_QUANTUMMUX && write_quantummux_config "$CONFIG_FILE"          || true
+    $HAS_DAGGERMUX && write_daggermux_config    "$CONFIG_FILE" "client" || true
+    $HAS_RAWMUX    && write_rawmux_config        "$CONFIG_FILE"          || true
+    $HAS_TUN       && write_tun_transport_config "$CONFIG_FILE" "client" || true
 
     cat >> "$CONFIG_FILE" << EOF
 
@@ -1331,20 +1585,25 @@ http_mimic:
     - "Accept-Encoding: gzip, deflate, br"
 EOF
 
-    create_systemd_service "client"
+    create_systemd_service "client" "$INSTANCE_NAME"
+
+    if $HAS_TUN; then
+        show_tun_transport_notes "client"
+    fi
 
     read -rp "  Optimize system? [Y/n]: " opt || true
     [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "foreign" || true
 
-    safe_start_enable "DaggerConnect-client"
+    safe_start_enable "DaggerConnect-${INSTANCE_NAME}"
 
     echo ""; divider
-    ok "Multi-Path Client configured!"
-    info "Paths:  ${GREEN}${PATH_COUNT}${NC}"
-    info "Config: ${CONFIG_FILE}"
-    info "Logs:   journalctl -u DaggerConnect-client -f"
-    $HAS_DAGGERMUX  && warn "DaggerMux: ensure server has iptables rules applied." || true
-    $HAS_QUANTUMMUX && info "QuantumMux: UDP-based tunnel active." || true
+    ok "Multi-Path Client '${INSTANCE_NAME}' configured!"
+    info "Service: ${GREEN}DaggerConnect-${INSTANCE_NAME}${NC}"
+    info "Paths:   ${GREEN}${PATH_COUNT}${NC}"
+    info "Config:  ${CONFIG_FILE}"
+    info "Logs:    journalctl -u DaggerConnect-${INSTANCE_NAME} -f"
+    $HAS_DAGGERMUX && warn "DaggerMux: ensure server has iptables rules applied." || true
+    $HAS_TUN       && warn "TUN transport: tun module loaded (modprobe tun)."     || true
     divider; press_enter; main_menu
 }
 
@@ -1355,10 +1614,12 @@ EOF
 install_client() {
     show_banner
     section "Client Configuration"
+
     echo -e "  ${WHITE}1)${NC} Automatic  — Single path ${GREEN}(Recommended)${NC}"
-    echo -e "  ${WHITE}2)${NC} Multi-Path — Multiple paths with per-PSK & TUN"
+    echo -e "  ${WHITE}2)${NC} Multi-Path — Multiple paths with per-PSK"
     echo ""
     read -rp "  Choice [1-2]: " cm || true
+
     case $cm in
         2) install_client_multipaths ;;
         *) install_client_automatic  ;;
@@ -1379,26 +1640,49 @@ update_binary() {
     fi
 
     info "Current version: ${GREEN}${CURRENT_VERSION}${NC}"
+    info "Checking latest version..."
+
+    local LATEST_VERSION
+    LATEST_VERSION=$(curl -s "$LATEST_RELEASE_API" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    if [[ -z "$LATEST_VERSION" ]]; then
+        warn "Could not reach GitHub API. Proceeding anyway."
+        LATEST_VERSION="unknown"
+    else
+        info "Latest version:  ${GREEN}${LATEST_VERSION}${NC}"
+    fi
+
+    if [[ "$LATEST_VERSION" != "unknown" && "$CURRENT_VERSION" == "$LATEST_VERSION" ]]; then
+        ok "Already on the latest version (${CURRENT_VERSION}). Nothing to do."
+        read -rp "  Force re-download anyway? [y/N]: " force || true
+        [[ ! $force =~ ^[Yy]$ ]] && press_enter && main_menu && return
+    fi
 
     read -rp "  Continue with update? [y/N]: " c || true
     [[ ! $c =~ ^[Yy]$ ]] && main_menu && return
 
-    systemctl stop DaggerConnect-server 2>/dev/null || true
-    systemctl stop DaggerConnect-client 2>/dev/null || true
+    # توقف همه سرویس‌های فعال
+    while IFS= read -r inst; do
+        systemctl stop "DaggerConnect-${inst}" 2>/dev/null || true
+    done < <(_list_all_instances)
     sleep 1
 
     download_binary
     local NEW_VERSION; NEW_VERSION=$(get_current_version)
     ok "Updated: ${YELLOW}${CURRENT_VERSION}${NC} -> ${GREEN}${NEW_VERSION}${NC}"
 
-    if systemctl is-enabled DaggerConnect-server &>/dev/null || \
-       systemctl is-enabled DaggerConnect-client &>/dev/null; then
-        read -rp "  Restart services? [Y/n]: " r || true
+    local HAS_ENABLED=false
+    while IFS= read -r inst; do
+        systemctl is-enabled "DaggerConnect-${inst}" &>/dev/null && HAS_ENABLED=true && break
+    done < <(_list_all_instances)
+
+    if $HAS_ENABLED; then
+        read -rp "  Restart all services? [Y/n]: " r || true
         if [[ ! $r =~ ^[Nn]$ ]]; then
-            systemctl is-enabled DaggerConnect-server &>/dev/null && \
-                systemctl start DaggerConnect-server && ok "Server restarted." || true
-            systemctl is-enabled DaggerConnect-client &>/dev/null && \
-                systemctl start DaggerConnect-client && ok "Client restarted." || true
+            while IFS= read -r inst; do
+                if systemctl is-enabled "DaggerConnect-${inst}" &>/dev/null 2>/dev/null; then
+                    systemctl start "DaggerConnect-${inst}" && ok "Restarted: ${inst}" || true
+                fi
+            done < <(_list_all_instances)
         fi
     fi
     press_enter; main_menu
@@ -1409,99 +1693,170 @@ update_binary() {
 # ============================================================================
 
 service_management() {
-    local MODE=$1
-    local SERVICE_NAME="DaggerConnect-${MODE}"
-    local CONFIG_FILE="$CONFIG_DIR/${MODE}.yaml"
+    local SERVICE_NAME
+    SERVICE_NAME=$(echo "$1" | tr -d '\r\n')
 
-    show_banner
-    section "${MODE^^} — Service Management"
+    local NAME="${SERVICE_NAME#DaggerConnect-}"
+    local CONFIG_FILE="$CONFIG_DIR/${NAME}.yaml"
 
-    systemctl is-active  --quiet "$SERVICE_NAME" && \
-        echo -e "  Status:     ${GREEN}● RUNNING${NC}" || echo -e "  Status:     ${RED}● STOPPED${NC}"
-    systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null && \
-        echo -e "  Auto-start: ${GREEN}enabled${NC}" || echo -e "  Auto-start: ${YELLOW}disabled${NC}"
+    while true; do
+        show_banner
+        section "Manage — ${CYAN}DaggerConnect-${NAME}${NC}"
 
-    echo ""; divider
-    echo -e "  ${WHITE}1)${NC} Start        ${WHITE}2)${NC} Stop         ${WHITE}3)${NC} Restart"
-    echo -e "  ${WHITE}4)${NC} Status       ${WHITE}5)${NC} Live Logs    ${WHITE}6)${NC} Enable auto-start"
-    echo -e "  ${WHITE}7)${NC} Disable auto-start"
-    divider
-    echo -e "  ${WHITE}8)${NC} View Config  ${WHITE}9)${NC} Edit Config  ${WHITE}10)${NC} Delete"
-    echo -e "  ${WHITE}0)${NC} Back"
-    divider
-    read -rp "  Select: " choice || true
+        # نمایش نوع (server/client) از config
+        if [[ -f "$CONFIG_FILE" ]]; then
+            local INST_MODE
+            INST_MODE=$(grep '^mode:' "$CONFIG_FILE" | head -1 | awk '{print $2}' | tr -d '"')
+            [[ -n "$INST_MODE" ]] && info "Type: ${WHITE}${INST_MODE}${NC}" || true
+        fi
 
-    case $choice in
-        1)  systemctl start   "$SERVICE_NAME" 2>/dev/null || warn "Start failed."; ok "Started.";   sleep 2; service_management "$MODE" ;;
-        2)  systemctl stop    "$SERVICE_NAME" 2>/dev/null || true; ok "Stopped."; sleep 2; service_management "$MODE" ;;
-        3)  systemctl restart "$SERVICE_NAME" 2>/dev/null || warn "Restart failed."; ok "Restarted."; sleep 2; service_management "$MODE" ;;
-        4)  systemctl status  "$SERVICE_NAME" --no-pager; press_enter; service_management "$MODE" ;;
-        5)  journalctl -u "$SERVICE_NAME" -f || true
-            service_management "$MODE" ;;
-        6)  systemctl enable  "$SERVICE_NAME" 2>/dev/null || warn "Enable failed."; ok "Auto-start enabled.";  sleep 2; service_management "$MODE" ;;
-        7)  systemctl disable "$SERVICE_NAME" 2>/dev/null || warn "Disable failed."; ok "Auto-start disabled."; sleep 2; service_management "$MODE" ;;
-        8)  [[ -f "$CONFIG_FILE" ]] && cat "$CONFIG_FILE" || err "Config not found."
-            press_enter; service_management "$MODE" ;;
-        9)  if [[ -f "$CONFIG_FILE" ]]; then
-                local BACKUP="${CONFIG_FILE}.bak.$(date +%Y%m%d_%H%M%S)"
-                cp "$CONFIG_FILE" "$BACKUP"
-                ok "Backup saved: ${DIM}${BACKUP}${NC}"
-                ${EDITOR:-nano} "$CONFIG_FILE"
-                read -rp "  Restart to apply? [y/N]: " r || true
-                [[ $r =~ ^[Yy]$ ]] && systemctl restart "$SERVICE_NAME" 2>/dev/null && ok "Restarted." || true
-                sleep 2
-            else
-                err "Config not found."; sleep 2
-            fi
-            service_management "$MODE" ;;
-        10) read -rp "  Delete ${MODE} service and config? [y/N]: " c || true
-            if [[ $c =~ ^[Yy]$ ]]; then
-                systemctl stop    "$SERVICE_NAME" 2>/dev/null || true
-                systemctl disable "$SERVICE_NAME" 2>/dev/null || true
-                rm -f "$CONFIG_FILE" "$SYSTEMD_DIR/${SERVICE_NAME}.service"
-                systemctl daemon-reload 2>/dev/null || true
-                ok "Deleted."; sleep 2
-            fi
-            settings_menu ;;
-        0)  settings_menu ;;
-        *)  service_management "$MODE" ;;
-    esac
-}
+        if systemctl is-active --quiet "$SERVICE_NAME"; then
+            echo -e "  Status:     ${GREEN}● RUNNING${NC}"
+        else
+            echo -e "  Status:     ${RED}● STOPPED${NC}"
+        fi
 
-settings_menu() {
-    show_banner
-    section "Settings"
-    echo -e "  ${WHITE}1)${NC} Manage Server"
-    echo -e "  ${WHITE}2)${NC} Manage Client"
-    echo -e "  ${WHITE}0)${NC} Back"
-    echo ""
-    read -rp "  Select: " choice || true
-    case $choice in
-        1) service_management "server" ;;
-        2) service_management "client" ;;
-        0) main_menu ;;
-        *) settings_menu ;;
-    esac
+        echo ""; divider
+        echo -e "  ${WHITE}1)${NC} Start        ${WHITE}2)${NC} Stop         ${WHITE}3)${NC} Restart"
+        echo -e "  ${WHITE}4)${NC} Status       ${WHITE}5)${NC} Live Logs"
+        echo -e "  ${WHITE}6)${NC} View Config  ${WHITE}7)${NC} Delete"
+        echo -e "  ${WHITE}0)${NC} Back"
+        divider
+        echo ""
+
+        read -rp "  Select: " choice || true
+
+        case $choice in
+            1) systemctl start   "$SERVICE_NAME" 2>/dev/null || true; sleep 1 ;;
+            2) systemctl stop    "$SERVICE_NAME" 2>/dev/null || true; sleep 1 ;;
+            3) systemctl restart "$SERVICE_NAME" 2>/dev/null || true; sleep 1 ;;
+            4) systemctl status  "$SERVICE_NAME" --no-pager || true; press_enter ;;
+            5) journalctl -u "$SERVICE_NAME" -f || true ;;
+            6)
+                if [[ -f "$CONFIG_FILE" ]]; then cat "$CONFIG_FILE"
+                else err "Config not found."; fi
+                press_enter ;;
+            7)
+                read -rp "  Delete '${NAME}'? [y/N]: " c || true
+                if [[ $c =~ ^[Yy]$ ]]; then
+                    systemctl stop    "$SERVICE_NAME" 2>/dev/null || true
+                    systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+                    rm -f "$CONFIG_FILE"
+                    rm -f "$SYSTEMD_DIR/${SERVICE_NAME}.service"
+                    systemctl daemon-reload 2>/dev/null || true
+                    ok "Instance '${NAME}' deleted."
+                    press_enter
+                    return
+                fi ;;
+            0) return ;;
+        esac
+    done
 }
 
 # ============================================================================
-# UNINSTALL
+# SETTINGS MENU — همه instances نامحدود
+# ============================================================================
+
+settings_menu() {
+    show_banner
+    section "Manage DaggerConnect Instances"
+
+    # جمع‌آوری همه سرویس‌ها
+    local INSTANCES=()
+    while IFS= read -r inst; do
+        [[ -n "$inst" ]] && INSTANCES+=("$inst")
+    done < <(_list_all_instances)
+
+    if [[ ${#INSTANCES[@]} -eq 0 ]]; then
+        err "No DaggerConnect instances found."
+        info "Create a server or client first."
+        press_enter
+        main_menu
+        return
+    fi
+
+    echo ""
+    echo -e "  ${DIM}Total instances: ${#INSTANCES[@]}${NC}"
+    echo ""
+
+    local i=1
+    for inst in "${INSTANCES[@]}"; do
+        local STATUS_ICON STATUS_COLOR
+        local CFG="$CONFIG_DIR/${inst}.yaml"
+        local INST_MODE=""
+
+        if systemctl is-active --quiet "DaggerConnect-${inst}" 2>/dev/null; then
+            STATUS_ICON="●"; STATUS_COLOR="$GREEN"
+        else
+            STATUS_ICON="○"; STATUS_COLOR="$RED"
+        fi
+
+        # خواندن mode از config
+        if [[ -f "$CFG" ]]; then
+            INST_MODE=$(grep '^mode:' "$CFG" | head -1 | awk '{print $2}' | tr -d '"')
+        fi
+
+        printf "  ${WHITE}%2d)${NC} ${STATUS_COLOR}%s${NC} %-28s ${DIM}%s${NC}\n" \
+            "$i" "$STATUS_ICON" "DaggerConnect-${inst}" "${INST_MODE:-unknown}"
+        ((i++))
+    done
+
+    echo ""
+    echo -e "  ${WHITE} 0)${NC} Back"
+    divider
+    echo ""
+
+    read -rp "  Select instance: " choice || true
+
+    if [[ "$choice" =~ ^[0-9]+$ ]]; then
+        if (( choice == 0 )); then
+            main_menu
+            return
+        fi
+        if (( choice >= 1 && choice <= ${#INSTANCES[@]} )); then
+            service_management "DaggerConnect-${INSTANCES[$((choice-1))]}"
+            settings_menu
+            return
+        fi
+    fi
+
+    settings_menu
+}
+
+# ============================================================================
+# UNINSTALL — همه instances
 # ============================================================================
 
 uninstall_daggerconnect() {
     show_banner
     section "Uninstall DaggerConnect"
-    warn "This will remove: binary, configs, services, certs, and optimizations."
+    warn "This will remove: binary, ALL configs, ALL services, certs, and optimizations."
     echo ""
+
+    local INSTANCES=()
+    while IFS= read -r inst; do
+        [[ -n "$inst" ]] && INSTANCES+=("$inst")
+    done < <(_list_all_instances)
+
+    if [[ ${#INSTANCES[@]} -gt 0 ]]; then
+        echo -e "  ${YELLOW}Instances to be removed:${NC}"
+        for inst in "${INSTANCES[@]}"; do
+            echo -e "    ${DIM}• DaggerConnect-${inst}${NC}"
+        done
+        echo ""
+    fi
+
     read -rp "  Are you sure? [y/N]: " c || true
     [[ ! $c =~ ^[Yy]$ ]] && main_menu && return
 
-    systemctl stop    DaggerConnect-server 2>/dev/null || true
-    systemctl stop    DaggerConnect-client 2>/dev/null || true
-    systemctl disable DaggerConnect-server 2>/dev/null || true
-    systemctl disable DaggerConnect-client 2>/dev/null || true
-    rm -f "$SYSTEMD_DIR/DaggerConnect-server.service"
-    rm -f "$SYSTEMD_DIR/DaggerConnect-client.service"
+    # حذف همه سرویس‌ها
+    for inst in "${INSTANCES[@]}"; do
+        systemctl stop    "DaggerConnect-${inst}" 2>/dev/null || true
+        systemctl disable "DaggerConnect-${inst}" 2>/dev/null || true
+        rm -f "$SYSTEMD_DIR/DaggerConnect-${inst}.service"
+        ok "Removed service: DaggerConnect-${inst}"
+    done
+
     rm -f "$INSTALL_DIR/DaggerConnect"
     rm -rf "$CONFIG_DIR"
     rm -f /etc/sysctl.d/99-daggerconnect.conf
@@ -1531,7 +1886,7 @@ uninstall_daggerconnect() {
 }
 
 # ============================================================================
-# STATUS DASHBOARD
+# STATUS DASHBOARD — همه instances
 # ============================================================================
 
 show_status_dashboard() {
@@ -1548,41 +1903,64 @@ show_status_dashboard() {
     echo ""
     divider
 
-    for MODE in server client; do
-        local SVC="DaggerConnect-${MODE}"
-        local CFG="$CONFIG_DIR/${MODE}.yaml"
+    # نمایش همه instances
+    local INSTANCES=()
+    while IFS= read -r inst; do
+        [[ -n "$inst" ]] && INSTANCES+=("$inst")
+    done < <(_list_all_instances)
+
+    if [[ ${#INSTANCES[@]} -eq 0 ]]; then
         echo ""
-        local MODE_CAP
-        MODE_CAP="$(echo "${MODE:0:1}" | tr '[:lower:]' '[:upper:]')${MODE:1}"
-        echo -e "  ${WHITE}-- ${MODE_CAP} --${NC}"
+        warn "No instances configured yet."
+    else
+        for inst in "${INSTANCES[@]}"; do
+            local SVC="DaggerConnect-${inst}"
+            local CFG="$CONFIG_DIR/${inst}.yaml"
 
-        if systemctl is-active --quiet "$SVC" 2>/dev/null; then
-            echo -e "  Status:     ${GREEN}● RUNNING${NC}"
-            local UPTIME
-            UPTIME=$(systemctl show "$SVC" --property=ActiveEnterTimestamp 2>/dev/null | cut -d= -f2)
-            [[ -n "$UPTIME" ]] && echo -e "  Started:    ${DIM}${UPTIME}${NC}" || true
-            local MEM
-            MEM=$(systemctl show "$SVC" --property=MemoryCurrent 2>/dev/null | cut -d= -f2)
-            if [[ -n "$MEM" && "$MEM" != "18446744073709551615" && "$MEM" != "[not set]" ]]; then
-                MEM=$((MEM / 1024 / 1024))
-                echo -e "  Memory:     ${DIM}${MEM} MB${NC}"
+            echo ""
+            echo -e "  ${WHITE}── ${CYAN}${inst}${NC} ──"
+
+            if systemctl is-active --quiet "$SVC" 2>/dev/null; then
+                echo -e "  Status:     ${GREEN}● RUNNING${NC}"
+                local UPTIME
+                UPTIME=$(systemctl show "$SVC" --property=ActiveEnterTimestamp 2>/dev/null | cut -d= -f2)
+                [[ -n "$UPTIME" ]] && echo -e "  Started:    ${DIM}${UPTIME}${NC}" || true
+                local MEM
+                MEM=$(systemctl show "$SVC" --property=MemoryCurrent 2>/dev/null | cut -d= -f2)
+                if [[ -n "$MEM" && "$MEM" != "18446744073709551615" && "$MEM" != "[not set]" ]]; then
+                    MEM=$((MEM / 1024 / 1024))
+                    echo -e "  Memory:     ${DIM}${MEM} MB${NC}"
+                fi
+            elif systemctl is-enabled "$SVC" &>/dev/null 2>/dev/null; then
+                echo -e "  Status:     ${RED}● STOPPED${NC} ${YELLOW}(enabled but not running)${NC}"
+            else
+                echo -e "  Status:     ${DIM}○ Not enabled${NC}"
             fi
-        elif systemctl is-enabled "$SVC" &>/dev/null 2>/dev/null; then
-            echo -e "  Status:     ${RED}● STOPPED${NC} ${YELLOW}(enabled but not running)${NC}"
-        else
-            echo -e "  Status:     ${DIM}○ Not configured${NC}"
-        fi
 
-        if [[ -f "$CFG" ]]; then
-            local TRANSPORT PORT_COUNT LISTEN_PORT
-            TRANSPORT=$(grep 'transport:' "$CFG" | head -1 | awk '{print $2}' | tr -d '"')
-            PORT_COUNT=$(grep -c 'type:' "$CFG" 2>/dev/null || echo 0)
-            LISTEN_PORT=$(grep 'addr:' "$CFG" | head -1 | awk '{print $2}' | tr -d '"' | cut -d: -f2)
-            [[ -n "$TRANSPORT"    ]] && echo -e "  Transport:  ${DIM}${TRANSPORT}${NC}"   || true
-            [[ -n "$LISTEN_PORT"  ]] && echo -e "  Port:       ${DIM}${LISTEN_PORT}${NC}" || true
-            [[ "$PORT_COUNT" -gt 0 ]] && echo -e "  Mappings:   ${DIM}${PORT_COUNT}${NC}" || true
-        fi
-    done
+            if [[ -f "$CFG" ]]; then
+                local INST_MODE TRANSPORT PORT_COUNT LISTEN_PORT
+                INST_MODE=$(grep '^mode:' "$CFG" | head -1 | awk '{print $2}' | tr -d '"')
+                TRANSPORT=$(grep 'transport:' "$CFG" | head -1 | awk '{print $2}' | tr -d '"')
+                PORT_COUNT=$(grep -c 'type:' "$CFG" 2>/dev/null || echo 0)
+                LISTEN_PORT=$(grep 'addr:' "$CFG" | head -1 | awk '{print $2}' | tr -d '"' | cut -d: -f2)
+
+                [[ -n "$INST_MODE"    ]] && echo -e "  Mode:       ${DIM}${INST_MODE}${NC}"      || true
+                [[ -n "$TRANSPORT"    ]] && echo -e "  Transport:  ${DIM}${TRANSPORT}${NC}"      || true
+                [[ -n "$LISTEN_PORT"  ]] && echo -e "  Port:       ${DIM}${LISTEN_PORT}${NC}"    || true
+                [[ "$PORT_COUNT" -gt 0 ]] && echo -e "  Mappings:   ${DIM}${PORT_COUNT}${NC}"   || true
+
+                if grep -q 'tun_transport:' "$CFG" 2>/dev/null; then
+                    local TT_DEV TT_PROF
+                    TT_DEV=$(grep 'device_name:' "$CFG" | head -1 | awk '{print $2}' | tr -d '"')
+                    TT_PROF=$(grep 'profile:' "$CFG" | head -1 | awk '{print $2}' | tr -d '"')
+                    [[ -n "$TT_DEV" ]] && echo -e "  TUN:        ${DIM}dev=${TT_DEV} profile=${TT_PROF}${NC}" || true
+                    if [[ -n "$TT_DEV" ]] && ip link show "$TT_DEV" &>/dev/null 2>/dev/null; then
+                        echo -e "  TUN State:  ${GREEN}● UP${NC}"
+                    fi
+                fi
+            fi
+        done
+    fi
 
     echo ""; divider
 
@@ -1611,26 +1989,77 @@ show_status_dashboard() {
     press_enter; main_menu
 }
 
+# ============================================================================
+# FIRST RUN
+# ============================================================================
+
+first_run_check() {
+    [[ -f "$FIRST_RUN_FLAG" ]] && return
+
+    show_banner
+    section "Initial Setup"
+
+    echo -e "  ${WHITE}Download DaggerConnect core from GitHub?${NC}"
+    echo -e "  ${DIM}(Default: Yes)${NC}"
+    echo ""
+
+    read -rp "  Proceed with download? [Y/n]: " ans || true
+
+    if [[ $ans =~ ^[Nn]$ ]]; then
+        mkdir -p "$CONFIG_DIR"
+        touch "$FIRST_RUN_FLAG"
+        return
+    fi
+
+    install_dependencies
+    download_binary
+
+    mkdir -p "$CONFIG_DIR"
+    touch "$FIRST_RUN_FLAG"
+
+    press_enter
+}
+
+# ============================================================================
+# MAIN MENU
+# ============================================================================
+
 main_menu() {
     show_banner
 
-    local CURRENT_VER; CURRENT_VER=$(get_current_version)
-    [[ "$CURRENT_VER" != "not-installed" ]] && echo -e "  Version: ${GREEN}${CURRENT_VER}${NC}" && echo "" || true
+    local CURRENT_VER
+    CURRENT_VER=$(get_current_version)
 
-    systemctl is-active --quiet DaggerConnect-server 2>/dev/null && echo -e "  Server : ${GREEN}● RUNNING${NC}" || true
-    systemctl is-active --quiet DaggerConnect-client 2>/dev/null && echo -e "  Client : ${GREEN}● RUNNING${NC}" || true
+    [[ "$CURRENT_VER" != "not-installed" ]] && \
+        echo -e "  Version: ${GREEN}${CURRENT_VER}${NC}" && echo "" || true
 
-    echo ""; divider
+    # نمایش تعداد و وضعیت همه instances
+    local RUNNING_COUNT=0 TOTAL_COUNT=0
+    while IFS= read -r inst; do
+        [[ -z "$inst" ]] && continue
+        TOTAL_COUNT=$((TOTAL_COUNT+1))
+        systemctl is-active --quiet "DaggerConnect-${inst}" 2>/dev/null && \
+            RUNNING_COUNT=$((RUNNING_COUNT+1)) || true
+    done < <(_list_all_instances)
+
+    if [[ "$TOTAL_COUNT" -gt 0 ]]; then
+        echo -e "  Instances: ${GREEN}${RUNNING_COUNT} running${NC} / ${WHITE}${TOTAL_COUNT} total${NC}"
+        echo ""
+    fi
+
+    divider
     echo -e "  ${WHITE}1)${NC} Install / Configure Server"
     echo -e "  ${WHITE}2)${NC} Install / Configure Client"
-    echo -e "  ${WHITE}3)${NC} Settings — Manage Services & Configs"
+    echo -e "  ${WHITE}3)${NC} Settings — Manage All Instances"
     echo -e "  ${WHITE}4)${NC} System Optimizer"
     echo -e "  ${WHITE}5)${NC} Status Dashboard"
     echo -e "  ${WHITE}6)${NC} Update Core"
     echo -e "  ${WHITE}7)${NC} Uninstall DaggerConnect"
     echo -e "  ${WHITE}0)${NC} Exit"
     divider; echo ""
+
     read -rp "  Select option: " choice || true
+
     case $choice in
         1) install_server          ;;
         2) install_client          ;;
@@ -1647,15 +2076,6 @@ main_menu() {
 # ============================================================================
 # ENTRY POINT
 # ============================================================================
-
 check_root
-show_banner
-install_dependencies
-
-if [[ ! -f "$INSTALL_DIR/DaggerConnect" ]]; then
-    warn "DaggerConnect binary not found — downloading..."
-    download_binary
-    echo ""
-fi
-
+first_run_check
 main_menu
