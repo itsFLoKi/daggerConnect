@@ -12,7 +12,7 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/DaggerConnect"
 SYSTEMD_DIR="/etc/systemd/system"
 LATEST_RELEASE_API="https://api.github.com/repos/itsFLoKi/DaggerConnect/releases/latest"
-BINARY_DOWNLOAD_URL_1="http://88.218.16.242/DaggerConnect"
+BINARY_DOWNLOAD_URL="http://88.218.16.242/DaggerConnect"
 FIRST_RUN_FLAG="$CONFIG_DIR/.first_run_done"
 
 # ── Global state vars ────────────────────────────────────────────────────────
@@ -23,6 +23,24 @@ _DM_IFACE=""; _DM_LOCAL_IP=""; _DM_ROUTER_MAC=""
 _DM_MTU="1350"; _DM_SND_WND="1024"; _DM_RCV_WND="1024"
 _DM_DATA_SHARD="10"; _DM_PARITY_SHARD="1"
 _DM_LOCAL_FLAGS="PA,A"; _DM_REMOTE_FLAGS="PA,A"
+
+# QuantumMux state vars (matches quantummux yaml keys exactly)
+_QM_IFACE=""
+_QM_LOCAL_IP=""
+_QM_ROUTER_MAC=""
+_QM_MTU="1280"
+_QM_SND_WND="1024"
+_QM_RCV_WND="1024"
+_QM_DATA_SHARD="10"
+_QM_PARITY_SHARD="3"
+_QM_TTL_BASE="64"
+_QM_TTL_JITTER="8"
+_QM_TCP_WINDOW="65535"
+_QM_ACK_STEP_MIN="64"
+_QM_ACK_STEP_MAX="512"
+_QM_TCP_FLAGS="PA"
+_QM_IDLE_TIMEOUT="60"
+_QM_ICMPV6_MODE="false"
 
 # TunTransport state vars (matches tun_transport yaml keys exactly)
 _TT_DEVICE="dagger0"
@@ -102,30 +120,29 @@ download_binary() {
 
     echo ""
     echo -e "  ${YELLOW}Select download source:${NC}"
-    echo -e "  ${WHITE}1)${NC} GitHub     — latest release (requires internet access to github.com)"
-
-    local LATEST_VERSION
-    LATEST_VERSION=$(curl -s --connect-timeout 5 "$LATEST_RELEASE_API" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    [[ -n "$LATEST_VERSION" ]] && echo -e "             ${DIM}(current: ${LATEST_VERSION})${NC}" || echo -e "             ${DIM}(could not fetch version)${NC}"
-
-    echo -e "  ${WHITE}2)${NC} Server 1   — ${GREEN}${BINARY_DOWNLOAD_URL_1}${NC}"
+    echo -e "  ${WHITE}1)${NC} GitHub     — ${DIM}latest release (needs access to github.com)${NC}"
+    echo -e "  ${WHITE}2)${NC} Direct     — ${GREEN}${BINARY_DOWNLOAD_URL}${NC} ${DIM}(recommended for Iran)${NC}"
     echo ""
-    read -rp "  Choice [1]: " DL_CHOICE || true
+    read -rp "  Choice [2]: " DL_CHOICE || true
 
     local BINARY_URL
-    case ${DL_CHOICE:-1} in
-        2)
-            BINARY_URL="$BINARY_DOWNLOAD_URL_1"
-            info "Source: ${GREEN}${BINARY_URL}${NC}"
-            ;;
-        3)
-            BINARY_URL="$BINARY_DOWNLOAD_URL_2"
-            info "Source: ${GREEN}${BINARY_URL}${NC}"
+    local LATEST_VERSION
+    case ${DL_CHOICE:-2} in
+        1)
+            info "Fetching latest version from GitHub..."
+            LATEST_VERSION=$(curl -s --connect-timeout 8 --max-time 10 "$LATEST_RELEASE_API" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*//')
+            if [[ -z "$LATEST_VERSION" ]]; then
+                warn "Could not reach GitHub API — falling back to direct server."
+                BINARY_URL="$BINARY_DOWNLOAD_URL"
+                info "Fallback source: ${GREEN}${BINARY_URL}${NC}"
+            else
+                BINARY_URL="https://github.com/itsFLoKi/DaggerConnect/releases/download/${LATEST_VERSION}/DaggerConnect"
+                info "GitHub release: ${GREEN}${LATEST_VERSION}${NC}"
+            fi
             ;;
         *)
-            [[ -z "$LATEST_VERSION" ]] && warn "Could not fetch latest version — using v1.5" && LATEST_VERSION="v1.5"
-            BINARY_URL="https://github.com/itsFLoKi/DaggerConnect/releases/download/${LATEST_VERSION}/DaggerConnect"
-            info "GitHub release: ${GREEN}${LATEST_VERSION}${NC}"
+            BINARY_URL="$BINARY_DOWNLOAD_URL"
+            info "Source: ${GREEN}${BINARY_URL}${NC}"
             ;;
     esac
 
@@ -136,20 +153,21 @@ download_binary() {
         rm -f "$INSTALL_DIR/DaggerConnect.backup"
         ok "Binary downloaded successfully."
     else
-        err "Download failed — trying Server 1 as fallback..."
-        BINARY_URL="$BINARY_DOWNLOAD_URL_1"
-        if wget -q --show-progress "$BINARY_URL" -O "$INSTALL_DIR/DaggerConnect"; then
-            chmod +x "$INSTALL_DIR/DaggerConnect"
-            rm -f "$INSTALL_DIR/DaggerConnect.backup"
-            ok "Binary downloaded from fallback source."
-        else
-            err "Download failed from all sources."
-            if [[ -f "$INSTALL_DIR/DaggerConnect.backup" ]]; then
-                mv "$INSTALL_DIR/DaggerConnect.backup" "$INSTALL_DIR/DaggerConnect"
-                warn "Restored previous version."
+        if [[ "$BINARY_URL" != "$BINARY_DOWNLOAD_URL" ]]; then
+            warn "GitHub download failed — trying direct server..."
+            if wget -q --show-progress "$BINARY_DOWNLOAD_URL" -O "$INSTALL_DIR/DaggerConnect"; then
+                chmod +x "$INSTALL_DIR/DaggerConnect"
+                rm -f "$INSTALL_DIR/DaggerConnect.backup"
+                ok "Binary downloaded from direct server."
+                return
             fi
-            exit 1
         fi
+        err "Download failed from all sources."
+        if [[ -f "$INSTALL_DIR/DaggerConnect.backup" ]]; then
+            mv "$INSTALL_DIR/DaggerConnect.backup" "$INSTALL_DIR/DaggerConnect"
+            warn "Restored previous version."
+        fi
+        exit 1
     fi
 }
 
@@ -316,20 +334,22 @@ select_transport() {
     echo -e "  ${WHITE}7)${NC} rawmux    — ${CYAN}Raw KCP/UDP + DPI Bypass${NC}" >&2
     echo -e "  ${WHITE}8)${NC} daggermux — ${PURPLE}Raw TCP/KCP via pcap${NC}" >&2
     echo -e "  ${WHITE}9)${NC} tun       — ${YELLOW}TUN Device + IPX Encapsulation${NC}" >&2
+    echo -e "  ${WHITE}10)${NC} quantummux — ${CYAN}Raw TCP via pcap + KCP + FEC ${PURPLE}(Advanced DPI Bypass)${NC}" >&2
     divider >&2
     echo "" >&2
-    read -rp "  Choice [1-9]: " trans_choice || true
+    read -rp "  Choice [1-10]: " trans_choice || true
     case $trans_choice in
-        1) echo "httpsmux"  ;;
-        2) echo "httpmux"   ;;
-        3) echo "wssmux"    ;;
-        4) echo "wsmux"     ;;
-        5) echo "kcpmux"    ;;
-        6) echo "tcpmux"    ;;
-        7) echo "rawmux"    ;;
-        8) echo "daggermux" ;;
-        9) echo "tun"       ;;
-        *) echo "httpsmux"  ;;
+        1)  echo "httpsmux"   ;;
+        2)  echo "httpmux"    ;;
+        3)  echo "wssmux"     ;;
+        4)  echo "wsmux"      ;;
+        5)  echo "kcpmux"     ;;
+        6)  echo "tcpmux"     ;;
+        7)  echo "rawmux"     ;;
+        8)  echo "daggermux"  ;;
+        9)  echo "tun"        ;;
+        10) echo "quantummux" ;;
+        *)  echo "httpsmux"   ;;
     esac
 }
 
@@ -417,6 +437,135 @@ configure_daggermux() {
     _DM_PARITY_SHARD="$DM_PARITY_SHARD"
     _DM_LOCAL_FLAGS="$DM_LOCAL_FLAGS"
     _DM_REMOTE_FLAGS="$DM_REMOTE_FLAGS"
+}
+
+# ============================================================================
+# HELPER: CONFIGURE QUANTUMMUX
+# ============================================================================
+
+configure_quantummux() {
+    local SIDE=$1
+
+    section "QuantumMux Configuration"
+    warn "Uses raw TCP packets via pcap to bypass DPI/firewalls."
+    warn "Requires: root access, libpcap-dev, and iptables rules on server."
+    echo ""
+
+    read -rp "  Network interface        [auto-detect]: " QM_IFACE || true
+    read -rp "  Local IP                 [auto-detect]: " QM_LOCAL_IP || true
+
+    if [[ "$SIDE" == "client" ]]; then
+        read -rp "  Gateway/Router MAC       [auto-detect]: " QM_ROUTER_MAC || true
+    else
+        QM_ROUTER_MAC=""
+    fi
+
+    echo ""
+    read -rp "  MTU                      [1280]: " QM_MTU || true;          QM_MTU=${QM_MTU:-1280}
+    read -rp "  Send window              [1024]: " QM_SND_WND || true;      QM_SND_WND=${QM_SND_WND:-1024}
+    read -rp "  Recv window              [1024]: " QM_RCV_WND || true;      QM_RCV_WND=${QM_RCV_WND:-1024}
+
+    echo ""
+    echo -e "  ${DIM}FEC — lower parity = less overhead (3 is default)${NC}"
+    read -rp "  Data shards              [10]:   " QM_DATA_SHARD || true;   QM_DATA_SHARD=${QM_DATA_SHARD:-10}
+    read -rp "  Parity shards            [3]:    " QM_PARITY_SHARD || true; QM_PARITY_SHARD=${QM_PARITY_SHARD:-3}
+
+    echo ""
+    echo -e "  ${DIM}TCP header spoofing parameters${NC}"
+    read -rp "  TTL base                 [64]:   " QM_TTL_BASE || true;     QM_TTL_BASE=${QM_TTL_BASE:-64}
+    read -rp "  TTL jitter               [8]:    " QM_TTL_JITTER || true;   QM_TTL_JITTER=${QM_TTL_JITTER:-8}
+    read -rp "  TCP window               [65535]: " QM_TCP_WINDOW || true;  QM_TCP_WINDOW=${QM_TCP_WINDOW:-65535}
+    read -rp "  Ack step min             [64]:   " QM_ACK_STEP_MIN || true; QM_ACK_STEP_MIN=${QM_ACK_STEP_MIN:-64}
+    read -rp "  Ack step max             [512]:  " QM_ACK_STEP_MAX || true; QM_ACK_STEP_MAX=${QM_ACK_STEP_MAX:-512}
+
+    echo ""
+    echo -e "  ${DIM}TCP flags to inject: PA=Push+Ack, A=Ack, S=Syn${NC}"
+    read -rp "  TCP flags                [PA]:   " QM_TCP_FLAGS || true;    QM_TCP_FLAGS=${QM_TCP_FLAGS:-"PA"}
+    read -rp "  Idle timeout (s)         [60]:   " QM_IDLE_TIMEOUT || true; QM_IDLE_TIMEOUT=${QM_IDLE_TIMEOUT:-60}
+
+    echo ""
+    read -rp "  Enable ICMPv6 mode?      [y/N]:  " QM_ICMPV6_EN || true
+    local QM_ICMPV6_MODE
+    if [[ "$QM_ICMPV6_EN" =~ ^[Yy]$ ]]; then
+        QM_ICMPV6_MODE="true"
+        info "ICMPv6 mode enabled — MTU will be clamped to 1250 by the engine."
+    else
+        QM_ICMPV6_MODE="false"
+    fi
+
+    _QM_IFACE="$QM_IFACE"
+    _QM_LOCAL_IP="$QM_LOCAL_IP"
+    _QM_ROUTER_MAC="$QM_ROUTER_MAC"
+    _QM_MTU="$QM_MTU"
+    _QM_SND_WND="$QM_SND_WND"
+    _QM_RCV_WND="$QM_RCV_WND"
+    _QM_DATA_SHARD="$QM_DATA_SHARD"
+    _QM_PARITY_SHARD="$QM_PARITY_SHARD"
+    _QM_TTL_BASE="$QM_TTL_BASE"
+    _QM_TTL_JITTER="$QM_TTL_JITTER"
+    _QM_TCP_WINDOW="$QM_TCP_WINDOW"
+    _QM_ACK_STEP_MIN="$QM_ACK_STEP_MIN"
+    _QM_ACK_STEP_MAX="$QM_ACK_STEP_MAX"
+    _QM_TCP_FLAGS="$QM_TCP_FLAGS"
+    _QM_IDLE_TIMEOUT="$QM_IDLE_TIMEOUT"
+    _QM_ICMPV6_MODE="$QM_ICMPV6_MODE"
+}
+
+write_quantummux_config() {
+    local FILE=$1
+    local SIDE=$2
+
+    {
+        echo ""
+        echo "quantummux:"
+        [[ -n "$_QM_IFACE" ]]      && echo "  interface: \"${_QM_IFACE}\""         || true
+        [[ -n "$_QM_LOCAL_IP" ]]   && echo "  local_ip: \"${_QM_LOCAL_IP}\""       || true
+        if [[ "$SIDE" == "client" && -n "$_QM_ROUTER_MAC" ]]; then
+            echo "  router_mac: \"${_QM_ROUTER_MAC}\""
+        fi
+        echo "  mtu: ${_QM_MTU}"
+        echo "  snd_wnd: ${_QM_SND_WND}"
+        echo "  rcv_wnd: ${_QM_RCV_WND}"
+        echo "  data_shard: ${_QM_DATA_SHARD}"
+        echo "  parity_shard: ${_QM_PARITY_SHARD}"
+        echo "  ttl_base: ${_QM_TTL_BASE}"
+        echo "  ttl_jitter: ${_QM_TTL_JITTER}"
+        echo "  tcp_window: ${_QM_TCP_WINDOW}"
+        echo "  ack_step_min: ${_QM_ACK_STEP_MIN}"
+        echo "  ack_step_max: ${_QM_ACK_STEP_MAX}"
+        echo "  tcp_flags: \"${_QM_TCP_FLAGS}\""
+        echo "  idle_timeout: ${_QM_IDLE_TIMEOUT}"
+        echo "  icmpv6_mode: ${_QM_ICMPV6_MODE}"
+    } >> "$FILE"
+}
+
+setup_quantummux_iptables() {
+    local PORT=$1
+    section "QuantumMux iptables Rules"
+    warn "These rules are MANDATORY — without them, kernel sends RST packets."
+    echo ""
+
+    iptables -t raw    -A PREROUTING -p tcp --dport "$PORT" -j NOTRACK                    2>/dev/null || true
+    iptables -t raw    -A OUTPUT     -p tcp --sport "$PORT" -j NOTRACK                    2>/dev/null || true
+    iptables -t mangle -A OUTPUT     -p tcp --sport "$PORT" --tcp-flags RST RST -j DROP   2>/dev/null || true
+    ok "iptables rules applied for port ${PORT}."
+
+    if command -v iptables-save &>/dev/null; then
+        mkdir -p /etc/iptables
+        iptables-save > /etc/iptables/rules.v4 2>/dev/null && ok "Rules saved to /etc/iptables/rules.v4" || true
+    fi
+
+    local IPRULES_FILE="/etc/network/if-pre-up.d/quantummux-iptables"
+    mkdir -p "$(dirname "$IPRULES_FILE")"
+    printf '#!/bin/bash\niptables -t raw    -A PREROUTING -p tcp --dport %s -j NOTRACK 2>/dev/null || true\niptables -t raw    -A OUTPUT     -p tcp --sport %s -j NOTRACK 2>/dev/null || true\niptables -t mangle -A OUTPUT     -p tcp --sport %s --tcp-flags RST RST -j DROP 2>/dev/null || true\n' \
+        "$PORT" "$PORT" "$PORT" > "$IPRULES_FILE"
+    chmod +x "$IPRULES_FILE" 2>/dev/null || true
+
+    echo ""
+    info "Manual commands (if needed):"
+    echo -e "  ${DIM}iptables -t raw    -A PREROUTING -p tcp --dport ${PORT} -j NOTRACK"
+    echo -e "  iptables -t raw    -A OUTPUT     -p tcp --sport ${PORT} -j NOTRACK"
+    echo -e "  iptables -t mangle -A OUTPUT     -p tcp --sport ${PORT} --tcp-flags RST RST -j DROP${NC}"
 }
 
 write_daggermux_config() {
@@ -958,9 +1107,10 @@ _write_transport_extras() {
     local FILE=$1
     local SIDE=$2
     local TRANSPORT=$3
-    [[ "$TRANSPORT" == "daggermux" ]] && write_daggermux_config    "$FILE" "$SIDE" || true
-    [[ "$TRANSPORT" == "rawmux"    ]] && write_rawmux_config        "$FILE"         || true
-    [[ "$TRANSPORT" == "tun"       ]] && write_tun_transport_config "$FILE" "$SIDE" || true
+    [[ "$TRANSPORT" == "daggermux"  ]] && write_daggermux_config    "$FILE" "$SIDE" || true
+    [[ "$TRANSPORT" == "rawmux"     ]] && write_rawmux_config        "$FILE"         || true
+    [[ "$TRANSPORT" == "tun"        ]] && write_tun_transport_config "$FILE" "$SIDE" || true
+    [[ "$TRANSPORT" == "quantummux" ]] && write_quantummux_config    "$FILE" "$SIDE" || true
 }
 
 # ============================================================================
@@ -1074,6 +1224,11 @@ install_server_automatic() {
 
     if [[ "$TRANSPORT" == "rawmux" ]]; then
         configure_rawmux
+    fi
+
+    if [[ "$TRANSPORT" == "quantummux" ]]; then
+        configure_quantummux "server"
+        setup_quantummux_iptables "$LISTEN_PORT"
     fi
 
     local AUTO_MAPPINGS=""
@@ -1216,7 +1371,7 @@ install_server_multilistener() {
     } > "$CONFIG_FILE"
 
     local LISTENER_COUNT=0
-    local HAS_DAGGERMUX=false HAS_RAWMUX=false HAS_TUN=false
+    local HAS_DAGGERMUX=false HAS_RAWMUX=false HAS_TUN=false HAS_QUANTUMMUX=false
 
     while true; do
         echo ""; echo -e "  ${PURPLE}== Listener #${LISTENER_COUNT} ==${NC}"
@@ -1268,6 +1423,17 @@ install_server_multilistener() {
             HAS_TUN=true
         fi
 
+        if [[ "$L_TRANSPORT" == "quantummux" ]]; then
+            L_PORT=$(echo "$L_ADDR" | cut -d: -f2)
+            if [[ -z "$L_PORT" ]] || ! [[ "$L_PORT" =~ ^[0-9]+$ ]]; then
+                err "Could not parse port from address '${L_ADDR}'. Skipping iptables."
+            else
+                configure_quantummux "server"
+                setup_quantummux_iptables "$L_PORT"
+            fi
+            HAS_QUANTUMMUX=true
+        fi
+
         L_MAPPINGS=""
         _CURRENT_TRANSPORT="$L_TRANSPORT"
         build_port_mappings; L_MAPPINGS="$MAPPINGS"
@@ -1306,9 +1472,10 @@ install_server_multilistener() {
         [[ ! $ML =~ ^[Yy]$ ]] && break
     done
 
-    $HAS_DAGGERMUX && write_daggermux_config    "$CONFIG_FILE" "server" || true
-    $HAS_RAWMUX    && write_rawmux_config        "$CONFIG_FILE"          || true
-    $HAS_TUN       && write_tun_transport_config "$CONFIG_FILE" "server" || true
+    $HAS_DAGGERMUX  && write_daggermux_config    "$CONFIG_FILE" "server" || true
+    $HAS_RAWMUX     && write_rawmux_config        "$CONFIG_FILE"          || true
+    $HAS_TUN        && write_tun_transport_config "$CONFIG_FILE" "server" || true
+    $HAS_QUANTUMMUX && write_quantummux_config    "$CONFIG_FILE" "server" || true
 
     write_common_tail "$CONFIG_FILE"
     create_systemd_service "server" "$INSTANCE_NAME"
@@ -1328,8 +1495,9 @@ install_server_multilistener() {
     info "Listeners: ${GREEN}${LISTENER_COUNT}${NC}"
     info "Config:    ${CONFIG_FILE}"
     info "Logs:      journalctl -u DaggerConnect-${INSTANCE_NAME} -f"
-    $HAS_DAGGERMUX && warn "DaggerMux: iptables rules applied." || true
-    $HAS_TUN       && warn "TUN transport: tun module loaded (modprobe tun)." || true
+    $HAS_DAGGERMUX  && warn "DaggerMux: iptables rules applied." || true
+    $HAS_QUANTUMMUX && warn "QuantumMux: iptables rules applied." || true
+    $HAS_TUN        && warn "TUN transport: tun module loaded (modprobe tun)." || true
     divider; press_enter; main_menu
 }
 
@@ -1394,6 +1562,10 @@ install_client_automatic() {
 
     if [[ "$TRANSPORT" == "rawmux" ]]; then
         configure_rawmux
+    fi
+
+    if [[ "$TRANSPORT" == "quantummux" ]]; then
+        configure_quantummux "client"
     fi
 
     CONFIG_FILE="$CONFIG_DIR/${INSTANCE_NAME}.yaml"
@@ -1498,7 +1670,7 @@ install_client_multipaths() {
     } > "$CONFIG_FILE"
 
     local PATH_COUNT=0
-    local HAS_DAGGERMUX=false HAS_RAWMUX=false HAS_TUN=false
+    local HAS_DAGGERMUX=false HAS_RAWMUX=false HAS_TUN=false HAS_QUANTUMMUX=false
 
     while true; do
         echo ""; echo -e "  ${PURPLE}== Path #${PATH_COUNT} ==${NC}"
@@ -1535,8 +1707,9 @@ install_client_multipaths() {
             [[ "$P_PORT_TUN" =~ ^[0-9]+$ ]] && _TT_HEALTH_PORT="$P_PORT_TUN" || true
             HAS_TUN=true
         fi
-        if [[ "$P_TRANSPORT" == "daggermux" ]]; then configure_daggermux "client"; HAS_DAGGERMUX=true; fi
-        if [[ "$P_TRANSPORT" == "rawmux"    ]]; then configure_rawmux;             HAS_RAWMUX=true;    fi
+        if [[ "$P_TRANSPORT" == "daggermux"  ]]; then configure_daggermux "client";  HAS_DAGGERMUX=true;  fi
+        if [[ "$P_TRANSPORT" == "rawmux"     ]]; then configure_rawmux;              HAS_RAWMUX=true;     fi
+        if [[ "$P_TRANSPORT" == "quantummux" ]]; then configure_quantummux "client"; HAS_QUANTUMMUX=true; fi
 
         read -rp "  Enable per-path smux TUN? [y/N]: " P_TUN_EN || true
         P_TUN_ENABLED=false
@@ -1571,9 +1744,10 @@ install_client_multipaths() {
         [[ ! $MP =~ ^[Yy]$ ]] && break
     done
 
-    $HAS_DAGGERMUX && write_daggermux_config    "$CONFIG_FILE" "client" || true
-    $HAS_RAWMUX    && write_rawmux_config        "$CONFIG_FILE"          || true
-    $HAS_TUN       && write_tun_transport_config "$CONFIG_FILE" "client" || true
+    $HAS_DAGGERMUX  && write_daggermux_config    "$CONFIG_FILE" "client" || true
+    $HAS_RAWMUX     && write_rawmux_config        "$CONFIG_FILE"          || true
+    $HAS_TUN        && write_tun_transport_config "$CONFIG_FILE" "client" || true
+    $HAS_QUANTUMMUX && write_quantummux_config    "$CONFIG_FILE" "client" || true
 
     cat >> "$CONFIG_FILE" << EOF
 
@@ -1646,8 +1820,9 @@ EOF
     info "Paths:   ${GREEN}${PATH_COUNT}${NC}"
     info "Config:  ${CONFIG_FILE}"
     info "Logs:    journalctl -u DaggerConnect-${INSTANCE_NAME} -f"
-    $HAS_DAGGERMUX && warn "DaggerMux: ensure server has iptables rules applied." || true
-    $HAS_TUN       && warn "TUN transport: tun module loaded (modprobe tun)."     || true
+    $HAS_DAGGERMUX  && warn "DaggerMux: ensure server has iptables rules applied." || true
+    $HAS_QUANTUMMUX && warn "QuantumMux: ensure server has iptables rules applied." || true
+    $HAS_TUN        && warn "TUN transport: tun module loaded (modprobe tun)."     || true
     divider; press_enter; main_menu
 }
 
@@ -1684,21 +1859,22 @@ update_binary() {
     fi
 
     info "Current version: ${GREEN}${CURRENT_VERSION}${NC}"
-    info "Checking latest version..."
 
-    local LATEST_VERSION
-    LATEST_VERSION=$(curl -s "$LATEST_RELEASE_API" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    if [[ -z "$LATEST_VERSION" ]]; then
-        warn "Could not reach GitHub API. Proceeding anyway."
-        LATEST_VERSION="unknown"
-    else
-        info "Latest version:  ${GREEN}${LATEST_VERSION}${NC}"
+    # بررسی سریع دسترسی به GitHub (timeout کوتاه)
+    local LATEST_VERSION=""
+    if curl -s --connect-timeout 4 --max-time 6 "$LATEST_RELEASE_API" &>/dev/null; then
+        LATEST_VERSION=$(curl -s --connect-timeout 4 --max-time 6 "$LATEST_RELEASE_API" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*//')
     fi
 
-    if [[ "$LATEST_VERSION" != "unknown" && "$CURRENT_VERSION" == "$LATEST_VERSION" ]]; then
-        ok "Already on the latest version (${CURRENT_VERSION}). Nothing to do."
-        read -rp "  Force re-download anyway? [y/N]: " force || true
-        [[ ! $force =~ ^[Yy]$ ]] && press_enter && main_menu && return
+    if [[ -n "$LATEST_VERSION" ]]; then
+        info "Latest on GitHub: ${GREEN}${LATEST_VERSION}${NC}"
+        if [[ "$CURRENT_VERSION" == "$LATEST_VERSION" ]]; then
+            ok "Already on the latest version (${CURRENT_VERSION})."
+            read -rp "  Force re-download anyway? [y/N]: " force || true
+            [[ ! $force =~ ^[Yy]$ ]] && press_enter && main_menu && return
+        fi
+    else
+        warn "GitHub unreachable — will download from direct server."
     fi
 
     read -rp "  Continue with update? [y/N]: " c || true
