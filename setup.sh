@@ -132,7 +132,16 @@ download_binary() {
             info "Fetching latest version from GitHub..."
             local API_RESPONSE
             API_RESPONSE=$(curl -s --connect-timeout 8 --max-time 10 "$LATEST_RELEASE_API" 2>/dev/null || true)
-            LATEST_VERSION=$(echo "$API_RESPONSE" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | grep -E '^v?[0-9]+\.[0-9]+' | head -1)
+            LATEST_VERSION=$(echo "$API_RESPONSE" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    tag = data.get('tag_name', '')
+    if tag and any(c.isdigit() for c in tag):
+        print(tag)
+except:
+    pass
+" 2>/dev/null || true)
             if [[ -z "$LATEST_VERSION" ]]; then
                 warn "Could not reach GitHub API — falling back to direct server."
                 BINARY_URL="$BINARY_DOWNLOAD_URL"
@@ -1866,7 +1875,16 @@ update_binary() {
     local LATEST_VERSION=""
     local API_RESPONSE=""
     API_RESPONSE=$(curl -s --connect-timeout 4 --max-time 6 "$LATEST_RELEASE_API" 2>/dev/null || true)
-    LATEST_VERSION=$(echo "$API_RESPONSE" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | grep -E '^v?[0-9]+\.[0-9]+' | head -1)
+    LATEST_VERSION=$(echo "$API_RESPONSE" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    tag = data.get('tag_name', '')
+    if tag and any(c.isdigit() for c in tag):
+        print(tag)
+except:
+    pass
+" 2>/dev/null || true)
 
     if [[ -n "$LATEST_VERSION" ]]; then
         info "Latest on GitHub: ${GREEN}${LATEST_VERSION}${NC}"
