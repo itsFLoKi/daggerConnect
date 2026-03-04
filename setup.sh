@@ -130,7 +130,9 @@ download_binary() {
     case ${DL_CHOICE:-2} in
         1)
             info "Fetching latest version from GitHub..."
-            LATEST_VERSION=$(curl -s --connect-timeout 8 --max-time 10 "$LATEST_RELEASE_API" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+            local API_RESPONSE
+            API_RESPONSE=$(curl -s --connect-timeout 8 --max-time 10 "$LATEST_RELEASE_API" 2>/dev/null || true)
+            LATEST_VERSION=$(echo "$API_RESPONSE" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | grep -E '^v?[0-9]+\.[0-9]+' | head -1)
             if [[ -z "$LATEST_VERSION" ]]; then
                 warn "Could not reach GitHub API — falling back to direct server."
                 BINARY_URL="$BINARY_DOWNLOAD_URL"
@@ -1862,9 +1864,9 @@ update_binary() {
 
     # بررسی سریع دسترسی به GitHub (timeout کوتاه)
     local LATEST_VERSION=""
-    if curl -s --connect-timeout 4 --max-time 6 "$LATEST_RELEASE_API" &>/dev/null; then
-        LATEST_VERSION=$(curl -s --connect-timeout 4 --max-time 6 "$LATEST_RELEASE_API" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    fi
+    local API_RESPONSE=""
+    API_RESPONSE=$(curl -s --connect-timeout 4 --max-time 6 "$LATEST_RELEASE_API" 2>/dev/null || true)
+    LATEST_VERSION=$(echo "$API_RESPONSE" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | grep -E '^v?[0-9]+\.[0-9]+' | head -1)
 
     if [[ -n "$LATEST_VERSION" ]]; then
         info "Latest on GitHub: ${GREEN}${LATEST_VERSION}${NC}"
