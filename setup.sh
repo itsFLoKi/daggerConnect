@@ -12,51 +12,34 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/DaggerConnect"
 SYSTEMD_DIR="/etc/systemd/system"
 LATEST_RELEASE_API="https://api.github.com/repos/itsFLoKi/DaggerConnect/releases/latest"
-BINARY_DOWNLOAD_URL="http://88.218.16.242/DaggerConnect"
+BINARY_DOWNLOAD_URL="http://ir.daggerconnect.site/DaggerConnect"
 FIRST_RUN_FLAG="$CONFIG_DIR/.first_run_done"
 
-# ── Global state vars ────────────────────────────────────────────────────────
-_TUN_NAME=""; _TUN_LOCAL=""; _TUN_PEER=""; _TUN_MTU="1400"
-_RM_HS_TIMEOUT="10"; _RM_KEEPALIVE="15"; _RM_RBUF="4194304"
-_RM_WBUF="4194304"; _RM_USE_PCAP="false"
-_DM_IFACE=""; _DM_LOCAL_IP=""; _DM_ROUTER_MAC=""
-_DM_MTU="1350"; _DM_SND_WND="1024"; _DM_RCV_WND="1024"
-_DM_DATA_SHARD="10"; _DM_PARITY_SHARD="1"
-_DM_LOCAL_FLAGS="PA,A"; _DM_REMOTE_FLAGS="PA,A"
+# ── State vars ───────────────────────────────────────────────────────────────
+# RawMux
+_RM_HS_TIMEOUT="10"; _RM_KEEPALIVE="15"; _RM_USE_PCAP="false"
 
-# QuantumMux state vars (matches quantummux yaml keys exactly)
-_QM_IFACE=""
-_QM_LOCAL_IP=""
-_QM_ROUTER_MAC=""
-_QM_MTU="1280"
-_QM_SND_WND="1024"
-_QM_RCV_WND="1024"
-_QM_DATA_SHARD="10"
-_QM_PARITY_SHARD="3"
-_QM_TTL_BASE="64"
-_QM_TTL_JITTER="8"
-_QM_TCP_WINDOW="65535"
-_QM_ACK_STEP_MIN="64"
-_QM_ACK_STEP_MAX="512"
-_QM_TCP_FLAGS="PA"
-_QM_IDLE_TIMEOUT="60"
-_QM_ICMPV6_MODE="false"
+# QuantumMux (spoof fields are all optional and default to empty)
+_QM_IFACE=""; _QM_LOCAL_IP=""; _QM_ROUTER_MAC=""
+_QM_DATA_SHARD="10"; _QM_PARITY_SHARD="1"
+_QM_SPOOF_SRC_IP=""; _QM_SPOOF_SRC_MAC=""
+_QM_CLIENT_SPOOF_IP=""; _QM_CLIENT_REAL_IP=""
+_QM_SERVER_SPOOF_IP=""
+_QM_USE_PCAP="false"
+_QM_MTU=""; _QM_ICMPV6_MODE="false"; _QM_NATURAL_SEND="false"
 
-# TunTransport state vars (matches tun_transport yaml keys exactly)
-_TT_DEVICE="dagger0"
-_TT_LOCAL_CIDR="10.10.10.2/24"
-_TT_REMOTE_CIDR="10.10.10.1/24"
-_TT_MTU="1320"
-_TT_PROFILE="tcp"
-_TT_LISTEN_IP="0.0.0.0"
-_TT_DEST_IP=""
-_TT_HEALTH_PORT="1234"
-_TT_WORKERS="0"
-_TT_BATCH_SIZE="2048"
-_TT_AUTO_TUNING="true"
-_TT_TUNING_PROFILE="balanced"
+# TunMux (new transport — replaces legacy tun mode)
+_TM_IFACE=""; _TM_LOCAL_IP=""; _TM_ROUTER_MAC=""
+_TM_PROFILE="tcp"; _TM_MTU=""; _TM_TTL_BASE=""; _TM_TTL_JITTER=""
+_TM_TCP_WINDOW=""; _TM_TCP_FLAGS=""
+_TM_SPOOF_SRC_IP=""; _TM_SERVER_SPOOF_IP=""
+_TM_CLIENT_SPOOF_IP=""; _TM_CLIENT_REAL_IP=""
+_TM_SNI_SPOOF=""
+_TM_PROTO58="false"; _TM_PROTO58_SRC_IPV6=""; _TM_PROTO58_DST_IPV6=""
+_TM_IDLE_TIMEOUT=""
 
 MAPPINGS=""
+LOG_LEVEL="info"
 
 # ============================================================================
 # UI HELPERS
@@ -65,26 +48,33 @@ MAPPINGS=""
 show_banner() {
     clear
     echo -e "${CYAN}"
-    echo -e "  ╔══════════════════════════════════════════╗"
-    echo -e "  ║       D A G G E R C O N N E C T         ║"
-    echo -e "  ║     High-Performance Tunnel Manager      ║"
-    echo -e "  ╠══════════════════════════════════════════╣"
-    echo -e "  ║  ${BLUE}Telegram: @DaggerConnect${CYAN}                 ║"
-    echo -e "  ╚══════════════════════════════════════════╝${NC}"
+    echo -e "  \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557"
+    echo -e "  \u2551       D A G G E R C O N N E C T         \u2551"
+    echo -e "  \u2551     High-Performance Tunnel Manager      \u2551"
+    echo -e "  \u2560\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2563"
+    echo -e "  \u2551  ${BLUE}Telegram: @DaggerConnect${CYAN}                 \u2551"
+    echo -e "  \u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d${NC}"
     echo ""
 }
 
-section()     { echo ""; echo -e "${CYAN}  ┌─ $1${NC}"; echo ""; }
-ok()          { echo -e "  ${GREEN}✓${NC}  $1"; }
-warn()        { echo -e "  ${YELLOW}⚠${NC}  $1"; }
-err()         { echo -e "  ${RED}✗${NC}  $1"; }
-info()        { echo -e "  ${DIM}→${NC}  $1"; }
-divider()     { echo -e "  ${DIM}──────────────────────────────────────────${NC}"; }
+section()     { echo ""; echo -e "${CYAN}  \u250c\u2500 $1${NC}"; echo ""; }
+ok()          { echo -e "  ${GREEN}v${NC}  $1"; }
+warn()        { echo -e "  ${YELLOW}!${NC}  $1"; }
+err()         { echo -e "  ${RED}x${NC}  $1"; }
+info()        { echo -e "  ${DIM}>${NC}  $1"; }
+divider()     { echo -e "  ${DIM}\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500${NC}"; }
 press_enter() { echo ""; read -rp "  Press Enter to continue..." _; }
 
-# ============================================================================
-# ROOT CHECK
-# ============================================================================
+# Yes/No helper (default No)
+_yn() {
+    local prompt=$1 default=${2:-N}
+    local v
+    read -rp "  ${prompt} [$( [[ $default == Y ]] && echo 'Y/n' || echo 'y/N' )]: " v || true
+    if [[ -z "$v" ]]; then
+        [[ "$default" == "Y" ]] && return 0 || return 1
+    fi
+    [[ "$v" =~ ^[Yy]$ ]] && return 0 || return 1
+}
 
 check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -93,13 +83,20 @@ check_root() {
     fi
 }
 
-# ============================================================================
-# DEPENDENCIES
-# ============================================================================
-
 install_dependencies() {
     section "Installing Dependencies"
-    ok "Dependencies ready."
+    # libpcap is required for pcap-based transports (rawmux, quantummux, tunmux)
+    if command -v apt-get &>/dev/null; then
+        apt-get install -y libpcap0.8 iptables openssl python3 wget curl >/dev/null 2>&1 \
+            && ok "Dependencies installed (apt)." \
+            || warn "Some packages may already be present."
+    elif command -v dnf &>/dev/null; then
+        dnf install -y libpcap iptables openssl python3 wget curl >/dev/null 2>&1 \
+            && ok "Dependencies installed (dnf)." \
+            || warn "Some packages may already be present."
+    else
+        ok "Dependencies ready (manual install assumed)."
+    fi
 }
 
 # ============================================================================
@@ -108,7 +105,7 @@ install_dependencies() {
 
 get_current_version() {
     if [[ -f "$INSTALL_DIR/DaggerConnect" ]]; then
-        "$INSTALL_DIR/DaggerConnect" -v 2>&1 | grep -oP 'v\d+\.\d+(\.\d+)?' || echo "unknown"
+        "$INSTALL_DIR/DaggerConnect" -v 2>&1 | grep -oP 'v\d+(\.\d+(\.\d+)?)?' || echo "unknown"
     else
         echo "not-installed"
     fi
@@ -117,35 +114,22 @@ get_current_version() {
 download_binary() {
     section "Downloading DaggerConnect"
     mkdir -p "$INSTALL_DIR"
-
     echo ""
     echo -e "  ${YELLOW}Select download source:${NC}"
-    echo -e "  ${WHITE}1)${NC} GitHub     — ${DIM}latest release (needs access to github.com)${NC}"
-    echo -e "  ${WHITE}2)${NC} Direct     — ${GREEN}${BINARY_DOWNLOAD_URL}${NC} ${DIM}(recommended for Iran)${NC}"
+    echo -e "  ${WHITE}1)${NC} GitHub     -- latest release"
+    echo -e "  ${WHITE}2)${NC} Direct     -- ${GREEN}${BINARY_DOWNLOAD_URL}${NC} ${DIM}(recommended)${NC}"
     echo ""
     read -rp "  Choice [2]: " DL_CHOICE || true
 
-    local BINARY_URL
-    local LATEST_VERSION
+    local BINARY_URL LATEST_VERSION
     case ${DL_CHOICE:-2} in
         1)
             info "Fetching latest version from GitHub..."
-            local API_RESPONSE
-            API_RESPONSE=$(curl -s --connect-timeout 8 --max-time 10 "$LATEST_RELEASE_API" 2>/dev/null || true)
-            LATEST_VERSION=$(echo "$API_RESPONSE" | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    tag = data.get('tag_name', '')
-    if tag and any(c.isdigit() for c in tag):
-        print(tag)
-except:
-    pass
-" 2>/dev/null || true)
+            LATEST_VERSION=$(curl -s --connect-timeout 8 --max-time 10 "$LATEST_RELEASE_API" \
+                | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
             if [[ -z "$LATEST_VERSION" ]]; then
-                warn "Could not reach GitHub API — falling back to direct server."
+                warn "Could not reach GitHub -- falling back to direct server."
                 BINARY_URL="$BINARY_DOWNLOAD_URL"
-                info "Fallback source: ${GREEN}${BINARY_URL}${NC}"
             else
                 BINARY_URL="https://github.com/itsFLoKi/DaggerConnect/releases/download/${LATEST_VERSION}/DaggerConnect"
                 info "GitHub release: ${GREEN}${LATEST_VERSION}${NC}"
@@ -157,7 +141,8 @@ except:
             ;;
     esac
 
-    [[ -f "$INSTALL_DIR/DaggerConnect" ]] && mv "$INSTALL_DIR/DaggerConnect" "$INSTALL_DIR/DaggerConnect.backup" || true
+    [[ -f "$INSTALL_DIR/DaggerConnect" ]] && \
+        mv "$INSTALL_DIR/DaggerConnect" "$INSTALL_DIR/DaggerConnect.backup" || true
 
     if wget -q --show-progress "$BINARY_URL" -O "$INSTALL_DIR/DaggerConnect"; then
         chmod +x "$INSTALL_DIR/DaggerConnect"
@@ -165,7 +150,7 @@ except:
         ok "Binary downloaded successfully."
     else
         if [[ "$BINARY_URL" != "$BINARY_DOWNLOAD_URL" ]]; then
-            warn "GitHub download failed — trying direct server..."
+            warn "GitHub download failed -- trying direct server..."
             if wget -q --show-progress "$BINARY_DOWNLOAD_URL" -O "$INSTALL_DIR/DaggerConnect"; then
                 chmod +x "$INSTALL_DIR/DaggerConnect"
                 rm -f "$INSTALL_DIR/DaggerConnect.backup"
@@ -189,43 +174,31 @@ except:
 optimize_system() {
     local LOCATION="${1:-iran}"
     section "System Optimization (${LOCATION^^})"
-
     local INTERFACE
     INTERFACE=$(ip link show | grep "state UP" | head -1 | awk '{print $2}' | cut -d: -f1)
     [[ -z "$INTERFACE" ]] && INTERFACE="eth0"
     info "Interface: ${GREEN}${INTERFACE}${NC}"
 
-    sysctl -w net.core.rmem_max=8388608               > /dev/null 2>&1 || true
-    sysctl -w net.core.wmem_max=8388608               > /dev/null 2>&1 || true
-    sysctl -w net.core.rmem_default=131072            > /dev/null 2>&1 || true
-    sysctl -w net.core.wmem_default=131072            > /dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_rmem="4096 65536 8388608"  > /dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_wmem="4096 65536 8388608"  > /dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_window_scaling=1           > /dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_timestamps=1               > /dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_sack=1                     > /dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_retries2=6                 > /dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_syn_retries=2              > /dev/null 2>&1 || true
-    sysctl -w net.core.netdev_max_backlog=1000         > /dev/null 2>&1 || true
-    sysctl -w net.core.somaxconn=512                  > /dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_fastopen=3                 > /dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_low_latency=1              > /dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_slow_start_after_idle=0    > /dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_no_metrics_save=1          > /dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_autocorking=0              > /dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_mtu_probing=1              > /dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_keepalive_time=120         > /dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_keepalive_intvl=10         > /dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_keepalive_probes=3         > /dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_fin_timeout=15             > /dev/null 2>&1 || true
-    sysctl -w net.ipv4.ip_forward=1                   > /dev/null 2>&1 || true
+    sysctl -w net.core.rmem_max=8388608 net.core.wmem_max=8388608 \
+              net.core.rmem_default=131072 net.core.wmem_default=131072 \
+              "net.ipv4.tcp_rmem=4096 65536 8388608" \
+              "net.ipv4.tcp_wmem=4096 65536 8388608" \
+              net.ipv4.tcp_window_scaling=1 net.ipv4.tcp_timestamps=1 \
+              net.ipv4.tcp_sack=1 net.ipv4.tcp_retries2=6 \
+              net.ipv4.tcp_syn_retries=2 net.core.netdev_max_backlog=1000 \
+              net.core.somaxconn=512 net.ipv4.tcp_fastopen=3 \
+              net.ipv4.tcp_low_latency=1 net.ipv4.tcp_slow_start_after_idle=0 \
+              net.ipv4.tcp_no_metrics_save=1 net.ipv4.tcp_autocorking=0 \
+              net.ipv4.tcp_mtu_probing=1 net.ipv4.tcp_keepalive_time=120 \
+              net.ipv4.tcp_keepalive_intvl=10 net.ipv4.tcp_keepalive_probes=3 \
+              net.ipv4.tcp_fin_timeout=15 net.ipv4.ip_forward=1 > /dev/null 2>&1 || true
 
     if modprobe tcp_bbr 2>/dev/null; then
-        sysctl -w net.ipv4.tcp_congestion_control=bbr > /dev/null 2>&1 || true
-        sysctl -w net.core.default_qdisc=fq_codel     > /dev/null 2>&1 || true
+        sysctl -w net.ipv4.tcp_congestion_control=bbr \
+                  net.core.default_qdisc=fq_codel > /dev/null 2>&1 || true
         ok "BBR congestion control enabled."
     else
-        warn "BBR not available — using CUBIC."
+        warn "BBR not available -- using CUBIC."
     fi
 
     tc qdisc del dev "$INTERFACE" root 2>/dev/null || true
@@ -263,7 +236,7 @@ net.ipv4.tcp_congestion_control=bbr
 net.core.default_qdisc=fq_codel
 net.ipv4.ip_forward=1
 EOF
-    ok "Optimization settings persisted to /etc/sysctl.d/99-daggerconnect.conf"
+    ok "Optimization settings saved."
 }
 
 system_optimizer_menu() {
@@ -283,42 +256,29 @@ system_optimizer_menu() {
 }
 
 # ============================================================================
-# HELPER: VALIDATE INSTANCE NAME
+# INSTANCE NAME
 # ============================================================================
 
 _validate_instance_name() {
     local NAME=$1
-    # فقط حروف، عدد، خط تیره و underscore مجاز
-    if [[ -z "$NAME" ]]; then
-        echo -e "  ${RED}✗${NC}  Name cannot be empty!" >&2; return 1
-    fi
-    if ! [[ "$NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-        echo -e "  ${RED}✗${NC}  Name can only contain letters, numbers, '-' and '_'" >&2; return 1
-    fi
-    if [[ ${#NAME} -gt 32 ]]; then
-        echo -e "  ${RED}✗${NC}  Name too long (max 32 chars)" >&2; return 1
-    fi
+    [[ -z "$NAME" ]]                    && { err "Name cannot be empty!" >&2; return 1; }
+    ! [[ "$NAME" =~ ^[a-zA-Z0-9_-]+$ ]] && { err "Name: letters, numbers, '-', '_' only" >&2; return 1; }
+    [[ ${#NAME} -gt 32 ]]               && { err "Name too long (max 32 chars)" >&2; return 1; }
     return 0
 }
 
 _pick_instance_name() {
-    local ROLE=$1        # "server" or "client"
-    local DEFAULT=$2     # default suggestion
-
+    local ROLE=$1 DEFAULT=$2
     echo "" >&2
-    echo -e "  ${YELLOW}Instance Name${NC} ${DIM}(used as DaggerConnect-{NAME})${NC}" >&2
-    echo -e "  ${DIM}Letters, numbers, '-' and '_' only. Max 32 chars.${NC}" >&2
-    echo -e "  ${DIM}Example: server-ir1 | client-de | tunnel-v2ray${NC}" >&2
+    echo -e "  ${YELLOW}Instance Name${NC} ${DIM}(DaggerConnect-{NAME})${NC}" >&2
     echo "" >&2
-
     local NAME
     while true; do
         read -rp "  Name [${DEFAULT}]: " NAME <>/dev/tty || true
         NAME=${NAME:-$DEFAULT}
         if _validate_instance_name "$NAME"; then
-            # بررسی تکراری بودن
-            if [[ -f "$CONFIG_DIR/${NAME}.yaml" ]]; then
-                echo -e "  ${YELLOW}⚠${NC}  Instance '${NAME}' already exists!" >&2
+            if [[ -f "$CONFIG_DIR/${NAME}.yaml" ]] || [[ -f "$CONFIG_DIR/${NAME}.json" ]]; then
+                warn "Instance '${NAME}' already exists!" >&2
                 read -rp "  Overwrite? [y/N]: " OW <>/dev/tty || true
                 [[ $OW =~ ^[Yy]$ ]] && break || continue
             fi
@@ -329,528 +289,227 @@ _pick_instance_name() {
 }
 
 # ============================================================================
-# HELPER: SELECT TRANSPORT
+# SELECT TRANSPORT
 # ============================================================================
 
 select_transport() {
     echo "" >&2
     echo -e "  ${YELLOW}Select Transport:${NC}" >&2
     divider >&2
-    echo -e "  ${WHITE}1)${NC} httpsmux  — HTTPS Mimicry ${GREEN}(Recommended)${NC}" >&2
-    echo -e "  ${WHITE}2)${NC} httpmux   — HTTP Mimicry" >&2
-    echo -e "  ${WHITE}3)${NC} wssmux    — WebSocket Secure" >&2
-    echo -e "  ${WHITE}4)${NC} wsmux     — WebSocket" >&2
-    echo -e "  ${WHITE}5)${NC} kcpmux    — KCP over UDP" >&2
-    echo -e "  ${WHITE}6)${NC} tcpmux    — Simple TCP" >&2
-    echo -e "  ${WHITE}7)${NC} rawmux    — ${CYAN}Raw KCP/UDP + DPI Bypass${NC}" >&2
-    echo -e "  ${WHITE}8)${NC} daggermux — ${PURPLE}Raw TCP/KCP via pcap${NC}" >&2
-    echo -e "  ${WHITE}9)${NC} tun       — ${YELLOW}TUN Device + IPX Encapsulation${NC}" >&2
-    echo -e "  ${WHITE}10)${NC} quantummux — ${CYAN}Raw TCP via pcap + KCP + FEC ${PURPLE}(Advanced DPI Bypass)${NC}" >&2
-    divider >&2
-    echo "" >&2
-    read -rp "  Choice [1-10]: " trans_choice || true
+    echo -e "  ${WHITE}1)${NC} httpsmux   -- HTTPS Mimicry ${GREEN}(Recommended)${NC}" >&2
+    echo -e "  ${WHITE}2)${NC} httpmux    -- HTTP Mimicry" >&2
+    echo -e "  ${WHITE}3)${NC} wssmux     -- WebSocket Secure" >&2
+    echo -e "  ${WHITE}4)${NC} wsmux      -- WebSocket" >&2
+    echo -e "  ${WHITE}5)${NC} kcpmux     -- KCP over UDP" >&2
+    echo -e "  ${WHITE}6)${NC} tcpmux     -- Simple TCP" >&2
+    echo -e "  ${WHITE}7)${NC} rawmux     -- ${CYAN}Raw KCP/UDP + DPI Bypass${NC}" >&2
+    echo -e "  ${WHITE}8)${NC} quantummux -- ${CYAN}Raw TCP via pcap + KCP + FEC${NC}" >&2
+    echo -e "  ${WHITE}9)${NC} tunmux     -- ${PURPLE}Pcap L2/L3 tunnel (tcp/udp/icmp/proto58)${NC}" >&2
+    divider >&2; echo "" >&2
+    read -rp "  Choice [1-9]: " trans_choice || true
     case $trans_choice in
-        1)  echo "httpsmux"   ;;
-        2)  echo "httpmux"    ;;
-        3)  echo "wssmux"     ;;
-        4)  echo "wsmux"      ;;
-        5)  echo "kcpmux"     ;;
-        6)  echo "tcpmux"     ;;
-        7)  echo "rawmux"     ;;
-        8)  echo "daggermux"  ;;
-        9)  echo "tun"        ;;
-        10) echo "quantummux" ;;
-        *)  echo "httpsmux"   ;;
+        2) echo "httpmux"    ;; 3) echo "wssmux"     ;; 4) echo "wsmux"      ;;
+        5) echo "kcpmux"     ;; 6) echo "tcpmux"     ;; 7) echo "rawmux"     ;;
+        8) echo "quantummux" ;; 9) echo "tunmux"     ;;
+        *) echo "httpsmux"   ;;
     esac
 }
 
 # ============================================================================
-# HELPER: CONFIGURE RAWMUX
+# RAWMUX
 # ============================================================================
 
 configure_rawmux() {
     section "RawMux Configuration"
-    info "KCP over real UDP socket with optional pcap DPI bypass."
+    read -rp "  Handshake timeout (s)    [10]: " v || true; _RM_HS_TIMEOUT=${v:-10}
+    read -rp "  Keepalive (s)            [15]: " v || true; _RM_KEEPALIVE=${v:-15}
     echo ""
-
-    read -rp "  Handshake timeout (s)    [10]:      " RM_HS_TIMEOUT || true; RM_HS_TIMEOUT=${RM_HS_TIMEOUT:-10}
-    read -rp "  Keepalive (s)            [15]:      " RM_KEEPALIVE || true;  RM_KEEPALIVE=${RM_KEEPALIVE:-15}
-    read -rp "  Read buffer (bytes)      [4194304]: " RM_RBUF || true;       RM_RBUF=${RM_RBUF:-4194304}
-    read -rp "  Write buffer (bytes)     [4194304]: " RM_WBUF || true;       RM_WBUF=${RM_WBUF:-4194304}
-    echo ""
-    read -rp "  Enable pcap DPI bypass?  [y/N]: " RM_PCAP_EN || true
-    local RM_USE_PCAP
-    [[ "$RM_PCAP_EN" =~ ^[Yy]$ ]] && RM_USE_PCAP="true" || RM_USE_PCAP="false"
-
-    _RM_HS_TIMEOUT="$RM_HS_TIMEOUT"
-    _RM_KEEPALIVE="$RM_KEEPALIVE"
-    _RM_RBUF="$RM_RBUF"
-    _RM_WBUF="$RM_WBUF"
-    _RM_USE_PCAP="$RM_USE_PCAP"
-}
-
-write_rawmux_config() {
-    local FILE=$1
-    {
-        echo ""
-        echo "rawmux:"
-        echo "  handshake_timeout: ${_RM_HS_TIMEOUT}"
-        echo "  keepalive: ${_RM_KEEPALIVE}"
-        echo "  read_buffer: ${_RM_RBUF}"
-        echo "  write_buffer: ${_RM_WBUF}"
-        echo "  use_pcap: ${_RM_USE_PCAP}"
-    } >> "$FILE"
+    if _yn "Enable pcap DPI bypass?" N; then _RM_USE_PCAP="true"; else _RM_USE_PCAP="false"; fi
 }
 
 # ============================================================================
-# HELPER: CONFIGURE DAGGERMUX
-# ============================================================================
-
-configure_daggermux() {
-    local SIDE=$1
-
-    section "DaggerMux Configuration"
-    warn "Uses raw TCP packets via pcap to bypass DPI/firewalls."
-    warn "Requires: root access, libpcap-dev, and iptables rules on server."
-    echo ""
-
-    read -rp "  Network interface        [auto-detect]: " DM_IFACE || true
-    read -rp "  Local IP                 [auto-detect]: " DM_LOCAL_IP || true
-
-    if [[ "$SIDE" == "client" ]]; then
-        read -rp "  Gateway/Router MAC       [auto-detect]: " DM_ROUTER_MAC || true
-    else
-        DM_ROUTER_MAC=""
-    fi
-
-    echo ""
-    read -rp "  MTU                      [1350]: " DM_MTU || true;        DM_MTU=${DM_MTU:-1350}
-    read -rp "  Send window              [1024]: " DM_SND_WND || true;    DM_SND_WND=${DM_SND_WND:-1024}
-    read -rp "  Recv window              [1024]: " DM_RCV_WND || true;    DM_RCV_WND=${DM_RCV_WND:-1024}
-
-    echo ""
-    echo -e "  ${DIM}FEC — lower parity = less overhead (1 is usually optimal)${NC}"
-    read -rp "  Data shards              [10]:   " DM_DATA_SHARD || true;   DM_DATA_SHARD=${DM_DATA_SHARD:-10}
-    read -rp "  Parity shards            [1]:    " DM_PARITY_SHARD || true; DM_PARITY_SHARD=${DM_PARITY_SHARD:-1}
-
-    echo ""
-    echo -e "  ${DIM}TCP flags to inject: PA=Push+Ack, A=Ack, S=Syn${NC}"
-    read -rp "  Local flags              [PA,A]: " DM_LOCAL_FLAGS || true;  DM_LOCAL_FLAGS=${DM_LOCAL_FLAGS:-"PA,A"}
-    read -rp "  Remote flags             [PA,A]: " DM_REMOTE_FLAGS || true; DM_REMOTE_FLAGS=${DM_REMOTE_FLAGS:-"PA,A"}
-
-    _DM_IFACE="$DM_IFACE"
-    _DM_LOCAL_IP="$DM_LOCAL_IP"
-    _DM_ROUTER_MAC="$DM_ROUTER_MAC"
-    _DM_MTU="$DM_MTU"
-    _DM_SND_WND="$DM_SND_WND"
-    _DM_RCV_WND="$DM_RCV_WND"
-    _DM_DATA_SHARD="$DM_DATA_SHARD"
-    _DM_PARITY_SHARD="$DM_PARITY_SHARD"
-    _DM_LOCAL_FLAGS="$DM_LOCAL_FLAGS"
-    _DM_REMOTE_FLAGS="$DM_REMOTE_FLAGS"
-}
-
-# ============================================================================
-# HELPER: CONFIGURE QUANTUMMUX
+# QUANTUMMUX
 # ============================================================================
 
 configure_quantummux() {
     local SIDE=$1
-
     section "QuantumMux Configuration"
-    warn "Uses raw TCP packets via pcap to bypass DPI/firewalls."
-    warn "Requires: root access, libpcap-dev, and iptables rules on server."
+    warn "Uses raw TCP packets via pcap. Requires root + libpcap + iptables rules."
     echo ""
-
-    read -rp "  Network interface        [auto-detect]: " QM_IFACE || true
-    read -rp "  Local IP                 [auto-detect]: " QM_LOCAL_IP || true
-
+    read -rp "  Network interface        [auto-detect]: " v || true; _QM_IFACE="${v:-}"
+    read -rp "  Local IP                 [auto-detect]: " v || true; _QM_LOCAL_IP="${v:-}"
     if [[ "$SIDE" == "client" ]]; then
-        read -rp "  Gateway/Router MAC       [auto-detect]: " QM_ROUTER_MAC || true
+        read -rp "  Gateway/Router MAC       [auto-detect]: " v || true; _QM_ROUTER_MAC="${v:-}"
     else
-        QM_ROUTER_MAC=""
+        _QM_ROUTER_MAC=""
     fi
 
+    # ── IP/MAC spoofing — fully optional, each field independent ────────────
+    _QM_SPOOF_SRC_IP=""; _QM_SPOOF_SRC_MAC=""
+    _QM_SERVER_SPOOF_IP=""; _QM_CLIENT_SPOOF_IP=""; _QM_CLIENT_REAL_IP=""
     echo ""
-    read -rp "  MTU                      [1280]: " QM_MTU || true;          QM_MTU=${QM_MTU:-1280}
-    read -rp "  Send window              [1024]: " QM_SND_WND || true;      QM_SND_WND=${QM_SND_WND:-1024}
-    read -rp "  Recv window              [1024]: " QM_RCV_WND || true;      QM_RCV_WND=${QM_RCV_WND:-1024}
-
-    echo ""
-    echo -e "  ${DIM}FEC — lower parity = less overhead (3 is default)${NC}"
-    read -rp "  Data shards              [10]:   " QM_DATA_SHARD || true;   QM_DATA_SHARD=${QM_DATA_SHARD:-10}
-    read -rp "  Parity shards            [3]:    " QM_PARITY_SHARD || true; QM_PARITY_SHARD=${QM_PARITY_SHARD:-3}
-
-    echo ""
-    echo -e "  ${DIM}TCP header spoofing parameters${NC}"
-    read -rp "  TTL base                 [64]:   " QM_TTL_BASE || true;     QM_TTL_BASE=${QM_TTL_BASE:-64}
-    read -rp "  TTL jitter               [8]:    " QM_TTL_JITTER || true;   QM_TTL_JITTER=${QM_TTL_JITTER:-8}
-    read -rp "  TCP window               [65535]: " QM_TCP_WINDOW || true;  QM_TCP_WINDOW=${QM_TCP_WINDOW:-65535}
-    read -rp "  Ack step min             [64]:   " QM_ACK_STEP_MIN || true; QM_ACK_STEP_MIN=${QM_ACK_STEP_MIN:-64}
-    read -rp "  Ack step max             [512]:  " QM_ACK_STEP_MAX || true; QM_ACK_STEP_MAX=${QM_ACK_STEP_MAX:-512}
-
-    echo ""
-    echo -e "  ${DIM}TCP flags to inject: PA=Push+Ack, A=Ack, S=Syn${NC}"
-    read -rp "  TCP flags                [PA]:   " QM_TCP_FLAGS || true;    QM_TCP_FLAGS=${QM_TCP_FLAGS:-"PA"}
-    read -rp "  Idle timeout (s)         [60]:   " QM_IDLE_TIMEOUT || true; QM_IDLE_TIMEOUT=${QM_IDLE_TIMEOUT:-60}
-
-    echo ""
-    read -rp "  Enable ICMPv6 mode?      [y/N]:  " QM_ICMPV6_EN || true
-    local QM_ICMPV6_MODE
-    if [[ "$QM_ICMPV6_EN" =~ ^[Yy]$ ]]; then
-        QM_ICMPV6_MODE="true"
-        info "ICMPv6 mode enabled — MTU will be clamped to 1250 by the engine."
-    else
-        QM_ICMPV6_MODE="false"
-    fi
-
-    _QM_IFACE="$QM_IFACE"
-    _QM_LOCAL_IP="$QM_LOCAL_IP"
-    _QM_ROUTER_MAC="$QM_ROUTER_MAC"
-    _QM_MTU="$QM_MTU"
-    _QM_SND_WND="$QM_SND_WND"
-    _QM_RCV_WND="$QM_RCV_WND"
-    _QM_DATA_SHARD="$QM_DATA_SHARD"
-    _QM_PARITY_SHARD="$QM_PARITY_SHARD"
-    _QM_TTL_BASE="$QM_TTL_BASE"
-    _QM_TTL_JITTER="$QM_TTL_JITTER"
-    _QM_TCP_WINDOW="$QM_TCP_WINDOW"
-    _QM_ACK_STEP_MIN="$QM_ACK_STEP_MIN"
-    _QM_ACK_STEP_MAX="$QM_ACK_STEP_MAX"
-    _QM_TCP_FLAGS="$QM_TCP_FLAGS"
-    _QM_IDLE_TIMEOUT="$QM_IDLE_TIMEOUT"
-    _QM_ICMPV6_MODE="$QM_ICMPV6_MODE"
-}
-
-write_quantummux_config() {
-    local FILE=$1
-    local SIDE=$2
-
-    {
-        echo ""
-        echo "quantummux:"
-        [[ -n "$_QM_IFACE" ]]      && echo "  interface: \"${_QM_IFACE}\""         || true
-        [[ -n "$_QM_LOCAL_IP" ]]   && echo "  local_ip: \"${_QM_LOCAL_IP}\""       || true
-        if [[ "$SIDE" == "client" && -n "$_QM_ROUTER_MAC" ]]; then
-            echo "  router_mac: \"${_QM_ROUTER_MAC}\""
+    echo -e "  ${DIM}── Spoofing (all fields optional, leave blank to disable) ──${NC}"
+    if _yn "Configure IP/MAC spoofing?" N; then
+        read -rp "  Spoof source IP          [skip]: " v || true; _QM_SPOOF_SRC_IP="${v:-}"
+        read -rp "  Spoof source MAC         [skip]: " v || true; _QM_SPOOF_SRC_MAC="${v:-}"
+        if [[ "$SIDE" == "server" ]]; then
+            read -rp "  Client spoof IP          [skip]: " v || true; _QM_CLIENT_SPOOF_IP="${v:-}"
+            read -rp "  Client real IP           [skip]: " v || true; _QM_CLIENT_REAL_IP="${v:-}"
+        else
+            read -rp "  Server spoof IP          [skip]: " v || true; _QM_SERVER_SPOOF_IP="${v:-}"
         fi
-        echo "  mtu: ${_QM_MTU}"
-        echo "  snd_wnd: ${_QM_SND_WND}"
-        echo "  rcv_wnd: ${_QM_RCV_WND}"
-        echo "  data_shard: ${_QM_DATA_SHARD}"
-        echo "  parity_shard: ${_QM_PARITY_SHARD}"
-        echo "  ttl_base: ${_QM_TTL_BASE}"
-        echo "  ttl_jitter: ${_QM_TTL_JITTER}"
-        echo "  tcp_window: ${_QM_TCP_WINDOW}"
-        echo "  ack_step_min: ${_QM_ACK_STEP_MIN}"
-        echo "  ack_step_max: ${_QM_ACK_STEP_MAX}"
-        echo "  tcp_flags: \"${_QM_TCP_FLAGS}\""
-        echo "  idle_timeout: ${_QM_IDLE_TIMEOUT}"
-        echo "  icmpv6_mode: ${_QM_ICMPV6_MODE}"
-    } >> "$FILE"
+    else
+        info "Spoofing disabled."
+    fi
+
+    # FEC params (kept simple — AdaptiveTuner manages perf-related stuff)
+    _QM_DATA_SHARD=10; _QM_PARITY_SHARD=1
+
+    echo ""
+    if _yn "Enable pcap RX mode?" N; then _QM_USE_PCAP="true"; else _QM_USE_PCAP="false"; fi
+
+    echo ""
+    read -rp "  MTU                      [auto]: " v || true; _QM_MTU="${v:-}"
+    if _yn "Enable ICMPv6 mode?" N; then _QM_ICMPV6_MODE="true"; else _QM_ICMPV6_MODE="false"; fi
+    if _yn "Enable Natural Send?"  N; then _QM_NATURAL_SEND="true"; else _QM_NATURAL_SEND="false"; fi
 }
 
 setup_quantummux_iptables() {
     local PORT=$1
     section "QuantumMux iptables Rules"
-    warn "These rules are MANDATORY — without them, kernel sends RST packets."
-    echo ""
-
-    iptables -t raw    -A PREROUTING -p tcp --dport "$PORT" -j NOTRACK                    2>/dev/null || true
-    iptables -t raw    -A OUTPUT     -p tcp --sport "$PORT" -j NOTRACK                    2>/dev/null || true
-    iptables -t mangle -A OUTPUT     -p tcp --sport "$PORT" --tcp-flags RST RST -j DROP   2>/dev/null || true
+    warn "MANDATORY -- without these rules, kernel sends RST packets."
+    iptables -t raw    -A PREROUTING -p tcp --dport "$PORT" -j NOTRACK                  2>/dev/null || true
+    iptables -t raw    -A OUTPUT     -p tcp --sport "$PORT" -j NOTRACK                  2>/dev/null || true
+    iptables -t mangle -A OUTPUT     -p tcp --sport "$PORT" --tcp-flags RST RST -j DROP 2>/dev/null || true
     ok "iptables rules applied for port ${PORT}."
-
     if command -v iptables-save &>/dev/null; then
         mkdir -p /etc/iptables
-        iptables-save > /etc/iptables/rules.v4 2>/dev/null && ok "Rules saved to /etc/iptables/rules.v4" || true
+        iptables-save > /etc/iptables/rules.v4 2>/dev/null && ok "Rules saved." || true
     fi
-
-    local IPRULES_FILE="/etc/network/if-pre-up.d/quantummux-iptables"
-    mkdir -p "$(dirname "$IPRULES_FILE")"
+    local F="/etc/network/if-pre-up.d/quantummux-iptables"
+    mkdir -p "$(dirname "$F")"
     printf '#!/bin/bash\niptables -t raw    -A PREROUTING -p tcp --dport %s -j NOTRACK 2>/dev/null || true\niptables -t raw    -A OUTPUT     -p tcp --sport %s -j NOTRACK 2>/dev/null || true\niptables -t mangle -A OUTPUT     -p tcp --sport %s --tcp-flags RST RST -j DROP 2>/dev/null || true\n' \
-        "$PORT" "$PORT" "$PORT" > "$IPRULES_FILE"
-    chmod +x "$IPRULES_FILE" 2>/dev/null || true
-
-    echo ""
-    info "Manual commands (if needed):"
-    echo -e "  ${DIM}iptables -t raw    -A PREROUTING -p tcp --dport ${PORT} -j NOTRACK"
-    echo -e "  iptables -t raw    -A OUTPUT     -p tcp --sport ${PORT} -j NOTRACK"
-    echo -e "  iptables -t mangle -A OUTPUT     -p tcp --sport ${PORT} --tcp-flags RST RST -j DROP${NC}"
-}
-
-write_daggermux_config() {
-    local FILE=$1
-    local SIDE=$2
-
-    local LOCAL_FLAGS_YAML=""
-    local OLD_IFS="$IFS"
-    IFS=',' read -ra FLAGS <<< "$_DM_LOCAL_FLAGS"
-    for f in "${FLAGS[@]}"; do
-        f=$(echo "$f" | tr -d ' ')
-        LOCAL_FLAGS_YAML="${LOCAL_FLAGS_YAML}    - \"${f}\"\n"
-    done
-
-    local REMOTE_FLAGS_YAML=""
-    IFS=',' read -ra FLAGS <<< "$_DM_REMOTE_FLAGS"
-    for f in "${FLAGS[@]}"; do
-        f=$(echo "$f" | tr -d ' ')
-        REMOTE_FLAGS_YAML="${REMOTE_FLAGS_YAML}    - \"${f}\"\n"
-    done
-    IFS="$OLD_IFS"
-
-    {
-        echo ""
-        echo "daggermux:"
-        [[ -n "$_DM_IFACE" ]]    && echo "  interface: \"${_DM_IFACE}\""   || true
-        [[ -n "$_DM_LOCAL_IP" ]] && echo "  local_ip: \"${_DM_LOCAL_IP}\"" || true
-        if [[ "$SIDE" == "client" && -n "$_DM_ROUTER_MAC" ]]; then
-            echo "  router_mac: \"${_DM_ROUTER_MAC}\""
-        fi
-        echo "  mtu: ${_DM_MTU}"
-        echo "  snd_wnd: ${_DM_SND_WND}"
-        echo "  rcv_wnd: ${_DM_RCV_WND}"
-        echo "  data_shard: ${_DM_DATA_SHARD}"
-        echo "  parity_shard: ${_DM_PARITY_SHARD}"
-        echo "  local_flags:"
-        printf '%b' "$LOCAL_FLAGS_YAML"
-        echo "  remote_flags:"
-        printf '%b' "$REMOTE_FLAGS_YAML"
-    } >> "$FILE"
-}
-
-setup_daggermux_iptables() {
-    local PORT=$1
-    section "DaggerMux iptables Rules"
-    warn "These rules are MANDATORY — without them, kernel sends RST packets."
-    echo ""
-
-    iptables -t raw    -A PREROUTING -p tcp --dport "$PORT" -j NOTRACK                    2>/dev/null || true
-    iptables -t raw    -A OUTPUT     -p tcp --sport "$PORT" -j NOTRACK                    2>/dev/null || true
-    iptables -t mangle -A OUTPUT     -p tcp --sport "$PORT" --tcp-flags RST RST -j DROP   2>/dev/null || true
-    ok "iptables rules applied for port ${PORT}."
-
-    if command -v iptables-save &>/dev/null; then
-        mkdir -p /etc/iptables
-        iptables-save > /etc/iptables/rules.v4 2>/dev/null && ok "Rules saved to /etc/iptables/rules.v4" || true
-    fi
-
-    local IPRULES_FILE="/etc/network/if-pre-up.d/daggermux-iptables"
-    mkdir -p "$(dirname "$IPRULES_FILE")"
-    printf '#!/bin/bash\niptables -t raw    -A PREROUTING -p tcp --dport %s -j NOTRACK 2>/dev/null || true\niptables -t raw    -A OUTPUT     -p tcp --sport %s -j NOTRACK 2>/dev/null || true\niptables -t mangle -A OUTPUT     -p tcp --sport %s --tcp-flags RST RST -j DROP 2>/dev/null || true\n' \
-        "$PORT" "$PORT" "$PORT" > "$IPRULES_FILE"
-    chmod +x "$IPRULES_FILE" 2>/dev/null || true
-
-    echo ""
-    info "Manual commands (if needed):"
-    echo -e "  ${DIM}iptables -t raw    -A PREROUTING -p tcp --dport ${PORT} -j NOTRACK"
-    echo -e "  iptables -t raw    -A OUTPUT     -p tcp --sport ${PORT} -j NOTRACK"
-    echo -e "  iptables -t mangle -A OUTPUT     -p tcp --sport ${PORT} --tcp-flags RST RST -j DROP${NC}"
+        "$PORT" "$PORT" "$PORT" > "$F"
+    chmod +x "$F" 2>/dev/null || true
 }
 
 # ============================================================================
-# HELPER: CONFIGURE TUN TRANSPORT
+# TUNMUX
 # ============================================================================
 
-configure_tun_transport() {
+configure_tunmux() {
     local SIDE=$1
-
-    section "TUN Transport Configuration"
-    info "TUN device with IPX encapsulation. No smux — direct packet forwarding."
-    warn "Requires: root access + tun kernel module."
+    section "TunMux Configuration"
+    warn "Pcap-based L2/L3 tunnel. Requires root + libpcap + iptables (tcp profile)."
     echo ""
 
-    read -rp "  TUN device name          [dagger0]:       " TT_DEV || true
-    TT_DEV=${TT_DEV:-dagger0}
-
-    if [[ "$SIDE" == "server" ]]; then
-        info "Server: local=10.10.10.1/24  remote=10.10.10.2/24"
-        read -rp "  Local CIDR               [10.10.10.1/24]: " TT_LOCAL || true
-        TT_LOCAL=${TT_LOCAL:-10.10.10.1/24}
-        read -rp "  Remote CIDR              [10.10.10.2/24]: " TT_REMOTE || true
-        TT_REMOTE=${TT_REMOTE:-10.10.10.2/24}
-    else
-        info "Client: local=10.10.10.2/24  remote=10.10.10.1/24"
-        read -rp "  Local CIDR               [10.10.10.2/24]: " TT_LOCAL || true
-        TT_LOCAL=${TT_LOCAL:-10.10.10.2/24}
-        read -rp "  Remote CIDR              [10.10.10.1/24]: " TT_REMOTE || true
-        TT_REMOTE=${TT_REMOTE:-10.10.10.1/24}
-    fi
-
-    read -rp "  MTU                      [1320]:          " TT_MTU || true
-    TT_MTU=${TT_MTU:-1320}
-    local TT_HEALTH=1234  # بعداً از LISTEN_PORT override میشه
-
+    # ── Profile ─────────────────────────────────────────────────────────────
+    echo -e "  ${YELLOW}Transport Profile:${NC}"
+    echo -e "  ${WHITE}1)${NC} tcp   -- Raw TCP wire (works behind most DPI) ${GREEN}(default)${NC}"
+    echo -e "  ${WHITE}2)${NC} udp   -- Raw UDP wire (fast, simpler)"
+    echo -e "  ${WHITE}3)${NC} icmp  -- ICMP-encapsulated (extreme DPI bypass)"
     echo ""
-    echo -e "  ${YELLOW}Encapsulation Profile:${NC}"
-    echo -e "  ${WHITE}1)${NC} tcp  — TCP stream        ${GREEN}(Recommended, no root needed)${NC}"
-    echo -e "  ${WHITE}2)${NC} udp  — UDP datagrams"
-    echo -e "  ${WHITE}3)${NC} bip  — UDP + magic header ${DIM}(traffic blending)${NC}"
-    echo -e "  ${WHITE}4)${NC} icmp — ICMP payload       ${YELLOW}(needs root/CAP_NET_RAW)${NC}"
-    echo -e "  ${WHITE}5)${NC} ipip — IP-in-IP           ${YELLOW}(needs root/CAP_NET_RAW)${NC}"
-    echo -e "  ${WHITE}6)${NC} gre  — GRE tunnel         ${YELLOW}(needs root/CAP_NET_RAW)${NC}"
-    echo ""
-    read -rp "  Profile [1]: " TT_PROF_CHOICE || true
-    case $TT_PROF_CHOICE in
-        2) TT_PROFILE="udp"  ;;
-        3) TT_PROFILE="bip"  ;;
-        4) TT_PROFILE="icmp" ;;
-        5) TT_PROFILE="ipip" ;;
-        6) TT_PROFILE="gre"  ;;
-        *) TT_PROFILE="tcp"  ;;
+    read -rp "  Choice [1]: " v || true
+    case ${v:-1} in
+        2) _TM_PROFILE="udp"  ;;
+        3) _TM_PROFILE="icmp" ;;
+        *) _TM_PROFILE="tcp"  ;;
     esac
+    info "Profile: ${GREEN}${_TM_PROFILE}${NC}"
 
     echo ""
-    read -rp "  Listen IP (bind)         [0.0.0.0]:       " TT_LISTEN_IP || true
-    TT_LISTEN_IP=${TT_LISTEN_IP:-0.0.0.0}
-
-    TT_DEST_IP=""
+    read -rp "  Network interface        [auto-detect]: " v || true; _TM_IFACE="${v:-}"
+    read -rp "  Local IP                 [auto-detect]: " v || true; _TM_LOCAL_IP="${v:-}"
     if [[ "$SIDE" == "client" ]]; then
-        read -rp "  Server IP (dest_ip):     " TT_DEST_IP || true
-        while [[ -z "$TT_DEST_IP" ]]; do
-            err "dest_ip is required on client side!"
-            read -rp "  Server IP (dest_ip):     " TT_DEST_IP || true
-        done
-    elif [[ "$TT_PROFILE" == "bip" || "$TT_PROFILE" == "icmp" || \
-            "$TT_PROFILE" == "ipip" || "$TT_PROFILE" == "gre" ]]; then
-        warn "Profile '${TT_PROFILE}' requires client IP for BPF filter on server side."
-        read -rp "  Client IP (dest_ip):     " TT_DEST_IP || true
-        while [[ -z "$TT_DEST_IP" ]]; do
-            err "dest_ip is required for profile '${TT_PROFILE}'!"
-            read -rp "  Client IP (dest_ip):     " TT_DEST_IP || true
-        done
-    fi
-
-    echo ""
-    echo -e "  ${YELLOW}Tuning Profile:${NC}"
-    echo -e "  ${WHITE}1)${NC} balanced  ${GREEN}(Recommended)${NC}"
-    echo -e "  ${WHITE}2)${NC} fast      — max throughput"
-    echo -e "  ${WHITE}3)${NC} latency   — min latency, fewer workers"
-    echo -e "  ${WHITE}4)${NC} resource  — low CPU/memory"
-    read -rp "  Choice [1]: " TT_TUNING_CHOICE || true
-    case $TT_TUNING_CHOICE in
-        2) TT_TUNING="fast"     ;;
-        3) TT_TUNING="latency"  ;;
-        4) TT_TUNING="resource" ;;
-        *) TT_TUNING="balanced" ;;
-    esac
-
-    read -rp "  Worker threads (0=auto)  [0]:             " TT_WORKERS || true
-    TT_WORKERS=${TT_WORKERS:-0}
-    read -rp "  Batch size               [2048]:          " TT_BATCH || true
-    TT_BATCH=${TT_BATCH:-2048}
-
-    _TT_DEVICE="$TT_DEV"
-    _TT_LOCAL_CIDR="$TT_LOCAL"
-    _TT_REMOTE_CIDR="$TT_REMOTE"
-    _TT_MTU="$TT_MTU"
-    _TT_PROFILE="$TT_PROFILE"
-    _TT_LISTEN_IP="$TT_LISTEN_IP"
-    _TT_DEST_IP="$TT_DEST_IP"
-    _TT_HEALTH_PORT="$TT_HEALTH"
-    _TT_WORKERS="$TT_WORKERS"
-    _TT_BATCH_SIZE="$TT_BATCH"
-    _TT_AUTO_TUNING="true"
-    _TT_TUNING_PROFILE="$TT_TUNING"
-}
-
-write_tun_transport_config() {
-    local FILE=$1
-    local SIDE=$2
-
-    {
-        echo ""
-        echo "tun_transport:"
-        echo "  device_name: \"${_TT_DEVICE}\""
-        echo "  local_cidr: \"${_TT_LOCAL_CIDR}\""
-        echo "  remote_cidr: \"${_TT_REMOTE_CIDR}\""
-        echo "  mtu: ${_TT_MTU}"
-        echo "  health_port: ${_TT_HEALTH_PORT}"
-        echo "  profile: \"${_TT_PROFILE}\""
-        echo "  listen_ip: \"${_TT_LISTEN_IP}\""
-        if [[ -n "${_TT_DEST_IP:-}" ]]; then
-            echo "  dest_ip: \"${_TT_DEST_IP}\""
-        fi
-        echo "  auto_tuning: ${_TT_AUTO_TUNING}"
-        echo "  tuning_profile: \"${_TT_TUNING_PROFILE}\""
-        echo "  workers: ${_TT_WORKERS}"
-        echo "  batch_size: ${_TT_BATCH_SIZE}"
-    } >> "$FILE"
-
-    modprobe tun 2>/dev/null || true
-}
-
-show_tun_transport_notes() {
-    local SIDE=$1
-    section "TUN Transport Notes"
-    ok "TUN kernel module: $(modprobe tun 2>/dev/null && echo 'loaded' || echo 'already active')"
-    info "Device '${_TT_DEVICE}' created automatically at startup."
-    info "Local CIDR:  ${GREEN}${_TT_LOCAL_CIDR}${NC}"
-    info "Remote CIDR: ${GREEN}${_TT_REMOTE_CIDR}${NC}"
-    info "Profile:     ${GREEN}${_TT_PROFILE}${NC}"
-    info "Tuning:      ${GREEN}${_TT_TUNING_PROFILE}${NC}"
-    echo ""
-    if [[ "$_TT_PROFILE" == "icmp" || "$_TT_PROFILE" == "ipip" || "$_TT_PROFILE" == "gre" ]]; then
-        warn "Profile '${_TT_PROFILE}' requires root and CAP_NET_RAW."
-        warn "Ensure firewall allows protocol: ${_TT_PROFILE}."
-    fi
-    info "Health check: tcp://$(hostname -I | awk '{print $1}'):$((${_TT_HEALTH_PORT}+1))/"
-}
-
-# ============================================================================
-# HELPER: CONFIGURE TUN (legacy per-listener TUN via smux)
-# ============================================================================
-
-configure_tun() {
-    local IDX=$1
-    local SIDE=$2
-
-    section "TUN Interface #${IDX}"
-    warn "Each TUN must use a UNIQUE /32 IP pair to prevent conflicts."
-    echo ""
-
-    local DEFAULT_NAME="dagger${IDX}"
-    read -rp "  Interface name    [${DEFAULT_NAME}]: " TUN_NAME || true; TUN_NAME=${TUN_NAME:-$DEFAULT_NAME}
-
-    if [[ "$SIDE" == "server" ]]; then
-        info "Example: local=20.40.${IDX}.1  peer=20.40.${IDX}.2"
-        read -rp "  Local IP (server) [20.40.${IDX}.1]: " TUN_LOCAL || true; TUN_LOCAL=${TUN_LOCAL:-"20.40.${IDX}.1"}
-        read -rp "  Peer  IP (client) [20.40.${IDX}.2]: " TUN_PEER || true;  TUN_PEER=${TUN_PEER:-"20.40.${IDX}.2"}
+        read -rp "  Gateway/Router MAC       [auto-detect]: " v || true; _TM_ROUTER_MAC="${v:-}"
     else
-        info "Example: local=20.40.${IDX}.2  peer=20.40.${IDX}.1"
-        read -rp "  Local IP (client) [20.40.${IDX}.2]: " TUN_LOCAL || true; TUN_LOCAL=${TUN_LOCAL:-"20.40.${IDX}.2"}
-        read -rp "  Peer  IP (server) [20.40.${IDX}.1]: " TUN_PEER || true;  TUN_PEER=${TUN_PEER:-"20.40.${IDX}.1"}
+        _TM_ROUTER_MAC=""
     fi
 
-    read -rp "  MTU               [1400]: " TUN_MTU || true; TUN_MTU=${TUN_MTU:-1400}
+    # ── Spoofing (all optional) ─────────────────────────────────────────────
+    _TM_SPOOF_SRC_IP=""; _TM_SERVER_SPOOF_IP=""
+    _TM_CLIENT_SPOOF_IP=""; _TM_CLIENT_REAL_IP=""
+    _TM_SNI_SPOOF=""
+    echo ""
+    echo -e "  ${DIM}── Spoofing (all fields optional, leave blank to disable) ──${NC}"
+    if _yn "Configure IP spoofing?" N; then
+        read -rp "  Spoof source IP          [skip]: " v || true; _TM_SPOOF_SRC_IP="${v:-}"
+        if [[ "$SIDE" == "server" ]]; then
+            read -rp "  Client spoof IP          [skip]: " v || true; _TM_CLIENT_SPOOF_IP="${v:-}"
+            read -rp "  Client real IP           [skip]: " v || true; _TM_CLIENT_REAL_IP="${v:-}"
+        else
+            read -rp "  Server spoof IP          [skip]: " v || true; _TM_SERVER_SPOOF_IP="${v:-}"
+        fi
+    else
+        info "Spoofing disabled."
+    fi
 
-    _TUN_NAME="$TUN_NAME"
-    _TUN_LOCAL="$TUN_LOCAL"
-    _TUN_PEER="$TUN_PEER"
-    _TUN_MTU="$TUN_MTU"
+    # ── SNI spoof (tcp profile only — sent in ClientHello) ──────────────────
+    if [[ "$_TM_PROFILE" == "tcp" && "$SIDE" == "client" ]]; then
+        echo ""
+        if _yn "Enable SNI spoof (fake TLS ClientHello)?" N; then
+            read -rp "  SNI hostname             [www.cloudflare.com]: " v || true
+            _TM_SNI_SPOOF="${v:-www.cloudflare.com}"
+        fi
+    fi
+
+    # ── Wire-shaping (defaults are sane; advanced users only) ───────────────
+    echo ""
+    echo -e "  ${DIM}── Advanced wire tuning (leave blank for defaults) ──${NC}"
+    read -rp "  MTU                      [1400]: " v || true; _TM_MTU="${v:-}"
+    read -rp "  TTL base                 [64]:   " v || true; _TM_TTL_BASE="${v:-}"
+    read -rp "  TTL jitter               [8]:    " v || true; _TM_TTL_JITTER="${v:-}"
+    if [[ "$_TM_PROFILE" == "tcp" ]]; then
+        read -rp "  TCP window               [65535]: " v || true; _TM_TCP_WINDOW="${v:-}"
+        read -rp "  TCP flags                [PA]:    " v || true; _TM_TCP_FLAGS="${v:-}"
+    fi
+    read -rp "  Idle timeout (s)         [120]:  " v || true; _TM_IDLE_TIMEOUT="${v:-}"
+
+    # ── proto58 (IPv6-in-IPv6 ESP-like wrapping for max obfuscation) ────────
+    _TM_PROTO58="false"; _TM_PROTO58_SRC_IPV6=""; _TM_PROTO58_DST_IPV6=""
+    echo ""
+    if _yn "Enable proto58 wrapping (IPv6 ESP-like — extreme stealth)?" N; then
+        _TM_PROTO58="true"
+        read -rp "  proto58 src IPv6         [link-local]: " v || true; _TM_PROTO58_SRC_IPV6="${v:-}"
+        read -rp "  proto58 dst IPv6         [link-local]: " v || true; _TM_PROTO58_DST_IPV6="${v:-}"
+    fi
+}
+
+setup_tunmux_iptables() {
+    # tcp profile needs the same NOTRACK + RST-drop rules as quantummux
+    local PORT=$1 PROFILE=$2
+    [[ "$PROFILE" != "tcp" ]] && { info "iptables rules not needed for profile=${PROFILE}."; return 0; }
+    section "TunMux iptables Rules (tcp profile)"
+    warn "MANDATORY for tcp profile -- prevents kernel RST."
+    iptables -t raw    -A PREROUTING -p tcp --dport "$PORT" -j NOTRACK                  2>/dev/null || true
+    iptables -t raw    -A OUTPUT     -p tcp --sport "$PORT" -j NOTRACK                  2>/dev/null || true
+    iptables -t mangle -A OUTPUT     -p tcp --sport "$PORT" --tcp-flags RST RST -j DROP 2>/dev/null || true
+    ok "iptables rules applied for port ${PORT}."
+    if command -v iptables-save &>/dev/null; then
+        mkdir -p /etc/iptables
+        iptables-save > /etc/iptables/rules.v4 2>/dev/null && ok "Rules saved." || true
+    fi
+    local F="/etc/network/if-pre-up.d/tunmux-iptables-${PORT}"
+    mkdir -p "$(dirname "$F")"
+    printf '#!/bin/bash\niptables -t raw    -A PREROUTING -p tcp --dport %s -j NOTRACK 2>/dev/null || true\niptables -t raw    -A OUTPUT     -p tcp --sport %s -j NOTRACK 2>/dev/null || true\niptables -t mangle -A OUTPUT     -p tcp --sport %s --tcp-flags RST RST -j DROP 2>/dev/null || true\n' \
+        "$PORT" "$PORT" "$PORT" > "$F"
+    chmod +x "$F" 2>/dev/null || true
 }
 
 # ============================================================================
-# PORT VALIDATION HELPER
+# PORT MAPPINGS
 # ============================================================================
 
 _validate_port() {
     local P=$1
-    local LABEL=${2:-"Port"}
     if ! [[ "$P" =~ ^[0-9]+$ ]] || [[ "$P" -lt 1 || "$P" -gt 65535 ]]; then
-        err "${LABEL} '${P}' is invalid (must be 1-65535)."
-        return 1
+        err "Port '${P}' is invalid (must be 1-65535)."; return 1
     fi
     return 0
 }
 
-# ============================================================================
-# HELPER: BUILD PORT MAPPINGS
-# ============================================================================
-
 _do_add_mapping() {
-    local BIND_P=$1
-    local TARGET_ADDR=$2
+    local BIND_P=$1 TARGET_ADDR=$2
     if [[ "$PROTO" == "both" ]]; then
         MAPPINGS="${MAPPINGS}  - type: tcp\n    bind: \"${BIND_IP}:${BIND_P}\"\n    target: \"${TARGET_ADDR}\"\n"
         MAPPINGS="${MAPPINGS}  - type: udp\n    bind: \"${BIND_IP}:${BIND_P}\"\n    target: \"${TARGET_ADDR}\"\n"
@@ -863,21 +522,12 @@ _do_add_mapping() {
 
 build_port_mappings() {
     local BIND_IP="0.0.0.0"
-    # اگه TUN انتخاب شده، target پیش‌فرض = peer IP تانل
     local TARGET_IP="127.0.0.1"
-    local _IS_TUN=false
-    [[ "${_CURRENT_TRANSPORT:-}" == "tun" ]] && _IS_TUN=true
-    if $_IS_TUN; then
-        TARGET_IP=$(echo "${_TT_REMOTE_CIDR}" | cut -d/ -f1)
-    fi
     MAPPINGS=""
     local COUNT=0
     local PROTO="tcp"
 
     section "Port Mappings"
-    if $_IS_TUN; then
-        info "TUN mode — default target IP: ${GREEN}${TARGET_IP}${NC} (remote peer)"
-    fi
     echo -e "  ${DIM}Formats: 8080 | 1000/2000 | 5000=8080 | 1000/1010=2000/2010 | 5000=1.2.3.4:8080${NC}"
     echo ""
 
@@ -900,10 +550,10 @@ build_port_mappings() {
             local BS="${BASH_REMATCH[1]}" BE="${BASH_REMATCH[2]}"
             local CTIP="${BASH_REMATCH[3]}" TS="${BASH_REMATCH[4]}" TE="${BASH_REMATCH[5]}"
             local _valid=true
-            _validate_port "$BS" "Bind start" || _valid=false
-            _validate_port "$BE" "Bind end"   || _valid=false
-            _validate_port "$TS" "Target start" || _valid=false
-            _validate_port "$TE" "Target end"   || _valid=false
+            _validate_port "$BS" || _valid=false
+            _validate_port "$BE" || _valid=false
+            _validate_port "$TS" || _valid=false
+            _validate_port "$TE" || _valid=false
             [[ "$_valid" == "false" ]] && continue
             local BR=$((BE-BS+1)) TR=$((TE-TS+1))
             if [[ "$BR" -ne "$TR" ]]; then err "Range size mismatch!"; continue; fi
@@ -916,10 +566,10 @@ build_port_mappings() {
             local BS="${BASH_REMATCH[1]}" BE="${BASH_REMATCH[2]}"
             local TS="${BASH_REMATCH[3]}" TE="${BASH_REMATCH[4]}"
             local _valid=true
-            _validate_port "$BS" "Bind start" || _valid=false
-            _validate_port "$BE" "Bind end"   || _valid=false
-            _validate_port "$TS" "Target start" || _valid=false
-            _validate_port "$TE" "Target end"   || _valid=false
+            _validate_port "$BS" || _valid=false
+            _validate_port "$BE" || _valid=false
+            _validate_port "$TS" || _valid=false
+            _validate_port "$TE" || _valid=false
             [[ "$_valid" == "false" ]] && continue
             local BR=$((BE-BS+1)) TR=$((TE-TS+1))
             if [[ "$BR" -ne "$TR" ]]; then err "Range size mismatch!"; continue; fi
@@ -931,8 +581,8 @@ build_port_mappings() {
         elif [[ "$PORT_INPUT" =~ ^([0-9]+)/([0-9]+)$ ]]; then
             local SP="${BASH_REMATCH[1]}" EP="${BASH_REMATCH[2]}"
             local _valid=true
-            _validate_port "$SP" "Start port" || _valid=false
-            _validate_port "$EP" "End port"   || _valid=false
+            _validate_port "$SP" || _valid=false
+            _validate_port "$EP" || _valid=false
             [[ "$_valid" == "false" ]] && continue
             if [[ "$SP" -gt "$EP" ]]; then err "Start > end!"; continue; fi
             local RS=$((EP-SP+1))
@@ -947,8 +597,8 @@ build_port_mappings() {
         elif [[ "$PORT_INPUT" =~ ^([0-9]+)=([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)$ ]]; then
             local BPORT="${BASH_REMATCH[1]}" CTIP="${BASH_REMATCH[2]}" TPORT="${BASH_REMATCH[3]}"
             local _valid=true
-            _validate_port "$BPORT" "Bind port"   || _valid=false
-            _validate_port "$TPORT" "Target port" || _valid=false
+            _validate_port "$BPORT" || _valid=false
+            _validate_port "$TPORT" || _valid=false
             [[ "$_valid" == "false" ]] && continue
             _do_add_mapping "${BPORT}" "${CTIP}:${TPORT}"
             ok "Added: ${BPORT} -> ${CTIP}:${TPORT} (${PROTO})"
@@ -956,14 +606,14 @@ build_port_mappings() {
         elif [[ "$PORT_INPUT" =~ ^([0-9]+)=([0-9]+)$ ]]; then
             local BPORT="${BASH_REMATCH[1]}" TPORT="${BASH_REMATCH[2]}"
             local _valid=true
-            _validate_port "$BPORT" "Bind port"   || _valid=false
-            _validate_port "$TPORT" "Target port" || _valid=false
+            _validate_port "$BPORT" || _valid=false
+            _validate_port "$TPORT" || _valid=false
             [[ "$_valid" == "false" ]] && continue
             _do_add_mapping "${BPORT}" "${TARGET_IP}:${TPORT}"
             ok "Added: ${BPORT} -> ${TPORT} (${PROTO})"
 
         elif [[ "$PORT_INPUT" =~ ^[0-9]+$ ]]; then
-            if ! _validate_port "$PORT_INPUT" "Port"; then continue; fi
+            if ! _validate_port "$PORT_INPUT"; then continue; fi
             _do_add_mapping "$PORT_INPUT" "${TARGET_IP}:${PORT_INPUT}"
             ok "Added: ${PORT_INPUT} -> ${PORT_INPUT} (${PROTO})"
 
@@ -982,45 +632,62 @@ build_port_mappings() {
 }
 
 # ============================================================================
-# WRITE COMMON CONFIG TAIL
+# PRESET SELECTOR
 # ============================================================================
 
-write_common_tail() {
-    local FILE=$1
-    cat >> "$FILE" << 'EOF'
+select_preset() {
+    echo "" >&2
+    section "Connection Preset"
+    echo -e "  ${WHITE}1)${NC} ${GREEN}Optimized${NC}    -- Balanced speed and stability ${DIM}(Recommended)${NC}" >&2
+    echo -e "  ${WHITE}2)${NC} ${CYAN}High-Speed${NC}   -- Maximum throughput, aggressive KCP" >&2
+    echo -e "  ${WHITE}3)${NC} ${BLUE}Stable${NC}       -- Conservative, tolerates high packet loss" >&2
+    echo -e "  ${WHITE}4)${NC} ${YELLOW}Low-Latency${NC}  -- Minimum delay, for gaming / VoIP" >&2
+    echo -e "  ${WHITE}5)${NC} ${DIM}Eco${NC}           -- Low CPU/memory, for weak VPS" >&2
+    divider >&2; echo "" >&2
+    read -rp "  Choice [1]: " v || true
+    case ${v:-1} in
+        2) PRESET_PROFILE="aggressive";    PRESET_HEARTBEAT=5  ;;
+        3) PRESET_PROFILE="balanced";      PRESET_HEARTBEAT=15 ;;
+        4) PRESET_PROFILE="gaming";        PRESET_HEARTBEAT=3  ;;
+        5) PRESET_PROFILE="cpu-efficient"; PRESET_HEARTBEAT=20 ;;
+        *) PRESET_PROFILE="latency";       PRESET_HEARTBEAT=8  ;;
+    esac
+}
 
-smux:
-  keepalive: 8
-  max_recv: 8388608
-  max_stream: 8388608
-  frame_size: 32768
-  version: 2
+write_preset_tail() {
+    local FILE=$1 PROFILE=$2 HEARTBEAT=$3
 
-kcp:
-  nodelay: 1
-  interval: 10
-  resend: 2
-  nc: 1
-  sndwnd: 1024
-  rcvwnd: 1024
-  mtu: 1400
+    if [[ "$FILE" == *.json ]]; then
+        python3 - "$FILE" << PEOF
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    cfg = json.load(f)
 
-advanced:
-  tcp_nodelay: true
-  tcp_keepalive: 15
-  tcp_read_buffer: 4194304
-  tcp_write_buffer: 4194304
-  websocket_read_buffer: 65536
-  websocket_write_buffer: 65536
-  websocket_compression: false
-  cleanup_interval: 3
-  session_timeout: 60
-  connection_timeout: 30
-  stream_timeout: 120
-  max_connections: 2000
-  max_udp_flows: 1000
-  udp_flow_timeout: 300
-  udp_buffer_size: 4194304
+cfg["obfuscation"] = {
+    "enabled": False,
+    "min_padding": 16,
+    "max_padding": 512,
+    "min_delay_ms": 0,
+    "max_delay_ms": 0,
+    "burst_chance": 0.15
+}
+cfg["http_mimic"] = {
+    "fake_domain": "www.google.com",
+    "fake_path": "/search",
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "chunked_encoding": False,
+    "session_cookie": True,
+    "custom_headers": ["Accept-Language: en-US,en;q=0.9", "Accept-Encoding: gzip, deflate, br"]
+}
+
+with open(path, 'w') as f:
+    json.dump(cfg, f, indent=2)
+PEOF
+        return 0
+    fi
+
+    cat >> "$FILE" << EOF
 
 obfuscation:
   enabled: false
@@ -1043,31 +710,41 @@ EOF
 }
 
 # ============================================================================
-# SSL CERT HELPER
+# LOG SETTINGS
+# ============================================================================
+
+select_log_settings() {
+    echo "" >&2
+    section "Log Settings" >&2
+    echo -e "  ${YELLOW}Log Level:${NC}" >&2
+    echo -e "  ${WHITE}1)${NC} info   -- normal operational events ${GREEN}(Recommended)${NC}" >&2
+    echo -e "  ${WHITE}2)${NC} warn   -- only warnings and errors" >&2
+    echo -e "  ${WHITE}3)${NC} error  -- only errors" >&2
+    echo -e "  ${WHITE}4)${NC} debug  -- all events (verbose, noisy)" >&2
+    echo "" >&2
+    read -rp "  Level [1]: " v || true
+    case ${v:-1} in
+        2) LOG_LEVEL="warn"  ;;
+        3) LOG_LEVEL="error" ;;
+        4) LOG_LEVEL="debug" ;;
+        *) LOG_LEVEL="info"  ;;
+    esac
+}
+
+# ============================================================================
+# SSL CERT
 # ============================================================================
 
 gen_ssl_cert() {
-    local CERT_OUT=$1
-    local KEY_OUT=$2
-    local DOMAIN=$3
-
+    local CERT_OUT=$1 KEY_OUT=$2 DOMAIN=$3
     DOMAIN=$(echo "$DOMAIN" | tr -cd 'a-zA-Z0-9._-')
     [[ -z "$DOMAIN" ]] && DOMAIN="www.google.com"
-
-    mkdir -p "$(dirname "$CERT_OUT")"
-    rm -f "$CERT_OUT" "$KEY_OUT"
-
-    if openssl req -x509 -newkey rsa:4096 \
-        -keyout "$KEY_OUT" \
-        -out "$CERT_OUT" \
-        -days 365 -nodes \
-        -subj "/C=US/O=MyCompany/CN=${DOMAIN}" 2>/dev/null; then
-        ok "SSL certificate generated for: ${DOMAIN}"
-        return 0
+    mkdir -p "$(dirname "$CERT_OUT")"; rm -f "$CERT_OUT" "$KEY_OUT"
+    if openssl req -x509 -newkey rsa:4096 -keyout "$KEY_OUT" -out "$CERT_OUT" \
+        -days 365 -nodes -subj "/C=US/O=MyCompany/CN=${DOMAIN}" 2>/dev/null; then
+        ok "SSL certificate generated for: ${DOMAIN}"; return 0
     else
-        err "SSL certificate generation failed."
-        rm -f "$CERT_OUT" "$KEY_OUT"
-        return 1
+        err "SSL certificate generation failed."; rm -f "$CERT_OUT" "$KEY_OUT"; return 1
     fi
 }
 
@@ -1076,16 +753,12 @@ gen_ssl_cert() {
 # ============================================================================
 
 create_systemd_service() {
-    local MODE=$1
-    local INSTANCE_NAME=${2:-$MODE}
-    local MODE_CAP
-    MODE_CAP="$(echo "${INSTANCE_NAME:0:1}" | tr '[:lower:]' '[:upper:]')${INSTANCE_NAME:1}"
-
+    local MODE=$1 INSTANCE_NAME=${2:-$MODE} CONFIG_PATH=${3:-"$CONFIG_DIR/${INSTANCE_NAME}.yaml"}
+    local CAP="$(echo "${INSTANCE_NAME:0:1}" | tr '[:lower:]' '[:upper:]')${INSTANCE_NAME:1}"
     mkdir -p "$SYSTEMD_DIR"
-
     cat > "$SYSTEMD_DIR/DaggerConnect-${INSTANCE_NAME}.service" << EOF
 [Unit]
-Description=DaggerConnect Reverse Tunnel — ${MODE_CAP}
+Description=DaggerConnect Reverse Tunnel -- ${CAP}
 After=network.target network-online.target
 Wants=network-online.target
 
@@ -1093,7 +766,7 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=$CONFIG_DIR
-ExecStart=$INSTALL_DIR/DaggerConnect -c $CONFIG_DIR/${INSTANCE_NAME}.yaml
+ExecStart=$INSTALL_DIR/DaggerConnect -c ${CONFIG_PATH}
 Restart=always
 RestartSec=3
 StandardOutput=journal
@@ -1103,157 +776,187 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
-
-    if ! systemctl daemon-reload 2>/dev/null; then
-        warn "systemctl daemon-reload failed — may happen in containers. Continuing."
-    fi
-    ok "Systemd service created: DaggerConnect-${INSTANCE_NAME}"
+    systemctl daemon-reload 2>/dev/null || \
+        warn "daemon-reload failed -- may happen in containers."
+    ok "Service created: DaggerConnect-${INSTANCE_NAME}"
 }
 
 # ============================================================================
-# _write_transport_extras
+# TRANSPORT-SPECIFIC CONFIG INJECTION (JSON merge via Python)
 # ============================================================================
+
+_inject_rawmux_json() {
+    local FILE=$1
+    python3 - "$FILE" << PEOF
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    cfg = json.load(f)
+cfg["rawmux"] = {
+    "handshake_timeout": $_RM_HS_TIMEOUT,
+    "keepalive": $_RM_KEEPALIVE,
+    "use_pcap": "$_RM_USE_PCAP" == "true"
+}
+with open(path, 'w') as f:
+    json.dump(cfg, f, indent=2)
+PEOF
+}
+
+_inject_tunmux_json() {
+    local FILE=$1 SIDE=$2
+    python3 - "$FILE" "$SIDE" << PEOF
+import json, sys
+path, side = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    cfg = json.load(f)
+
+tm = {"profile": "$_TM_PROFILE"}
+
+# Network
+if "$_TM_IFACE":      tm["interface"]  = "$_TM_IFACE"
+if "$_TM_LOCAL_IP":   tm["local_ip"]   = "$_TM_LOCAL_IP"
+if side == "client" and "$_TM_ROUTER_MAC":
+    tm["router_mac"] = "$_TM_ROUTER_MAC"
+
+# Spoofing (optional)
+if "$_TM_SPOOF_SRC_IP":    tm["spoof_src_ip"]    = "$_TM_SPOOF_SRC_IP"
+if side == "server":
+    if "$_TM_CLIENT_SPOOF_IP": tm["client_spoof_ip"] = "$_TM_CLIENT_SPOOF_IP"
+    if "$_TM_CLIENT_REAL_IP":  tm["client_real_ip"]  = "$_TM_CLIENT_REAL_IP"
+else:
+    if "$_TM_SERVER_SPOOF_IP": tm["server_spoof_ip"] = "$_TM_SERVER_SPOOF_IP"
+
+# SNI spoof (client + tcp profile only)
+if "$_TM_SNI_SPOOF" and side == "client" and "$_TM_PROFILE" == "tcp":
+    tm["sni_spoof"] = "$_TM_SNI_SPOOF"
+
+# Wire-shaping
+for key, val in [
+    ("mtu", "$_TM_MTU"), ("ttl_base", "$_TM_TTL_BASE"), ("ttl_jitter", "$_TM_TTL_JITTER"),
+    ("tcp_window", "$_TM_TCP_WINDOW"), ("idle_timeout", "$_TM_IDLE_TIMEOUT"),
+]:
+    if val:
+        try: tm[key] = int(val)
+        except ValueError: pass
+if "$_TM_TCP_FLAGS":
+    tm["tcp_flags"] = "$_TM_TCP_FLAGS"
+
+# proto58
+if "$_TM_PROTO58" == "true":
+    tm["proto58"] = True
+    if "$_TM_PROTO58_SRC_IPV6": tm["proto58_src_ipv6"] = "$_TM_PROTO58_SRC_IPV6"
+    if "$_TM_PROTO58_DST_IPV6": tm["proto58_dst_ipv6"] = "$_TM_PROTO58_DST_IPV6"
+
+cfg["tunmux"] = tm
+with open(path, 'w') as f:
+    json.dump(cfg, f, indent=2)
+PEOF
+}
 
 _write_transport_extras() {
-    local FILE=$1
-    local SIDE=$2
-    local TRANSPORT=$3
-    [[ "$TRANSPORT" == "daggermux"  ]] && write_daggermux_config    "$FILE" "$SIDE" || true
-    [[ "$TRANSPORT" == "rawmux"     ]] && write_rawmux_config        "$FILE"         || true
-    [[ "$TRANSPORT" == "tun"        ]] && write_tun_transport_config "$FILE" "$SIDE" || true
-    [[ "$TRANSPORT" == "quantummux" ]] && write_quantummux_config    "$FILE" "$SIDE" || true
+    local FILE=$1 SIDE=$2 TRANSPORT=$3
+    if [[ "$FILE" == *.json ]]; then
+        case "$TRANSPORT" in
+            rawmux)     _inject_rawmux_json "$FILE" ;;
+            tunmux)     _inject_tunmux_json "$FILE" "$SIDE" ;;
+            quantummux) : ;; # written inline in install_server/install_client
+        esac
+        return 0
+    fi
+    # YAML fallback handled inline above; nothing to do here.
 }
-
-# ============================================================================
-# HELPER: SAFE SERVICE START+ENABLE
-# ============================================================================
 
 safe_start_enable() {
     local SERVICE=$1
     if [[ ! -f "$SYSTEMD_DIR/${SERVICE}.service" ]]; then
         err "Service file not found: $SYSTEMD_DIR/${SERVICE}.service"
-        warn "Config was saved. Start manually: systemctl start ${SERVICE}"
-        return 1
+        warn "Config saved. Start manually: systemctl start ${SERVICE}"; return 1
     fi
-    systemctl start  "$SERVICE" 2>/dev/null || warn "Service start failed — check: journalctl -u ${SERVICE} -n 50"
+    systemctl start  "$SERVICE" 2>/dev/null || warn "Service start failed -- check: journalctl -u ${SERVICE} -n 50"
     systemctl enable "$SERVICE" 2>/dev/null || warn "Service enable failed."
 }
 
-# ============================================================================
-# PORT CONFLICT CHECK
-# ============================================================================
-
 check_port_available() {
-    local PORT=$1
-    local IN_USE=false
-
+    local PORT=$1 IN_USE=false
     if command -v ss &>/dev/null; then
-        if ss -tlnp 2>/dev/null | grep -q ":${PORT} " || \
-           ss -ulnp 2>/dev/null | grep -q ":${PORT} "; then
-            IN_USE=true
-        fi
+        { ss -tlnp 2>/dev/null | grep -q ":${PORT} " || \
+          ss -ulnp 2>/dev/null | grep -q ":${PORT} "; } && IN_USE=true || true
     elif command -v netstat &>/dev/null; then
-        if netstat -tlnp 2>/dev/null | grep -q ":${PORT} " || \
-           netstat -ulnp 2>/dev/null | grep -q ":${PORT} "; then
-            IN_USE=true
-        fi
+        { netstat -tlnp 2>/dev/null | grep -q ":${PORT} " || \
+          netstat -ulnp 2>/dev/null | grep -q ":${PORT} "; } && IN_USE=true || true
     fi
-
     if $IN_USE; then
-        local OWNER=""
-        command -v ss &>/dev/null && \
-            OWNER=$(ss -tlnp 2>/dev/null | grep ":${PORT} " | awk '{print $NF}' | head -1) || true
-        warn "Port ${PORT} is already in use! (${OWNER:-unknown process})"
-        return 1
+        local OWN; OWN=$(ss -tlnp 2>/dev/null | grep ":${PORT} " | awk '{print $NF}' | head -1) || true
+        warn "Port ${PORT} is in use! (${OWN:-unknown})"; return 1
     fi
     return 0
 }
 
-# ============================================================================
-# LIST ALL INSTANCES HELPER
-# ============================================================================
+_instance_config() {
+    local inst=$1
+    if   [[ -f "$CONFIG_DIR/${inst}.yaml" ]]; then echo "$CONFIG_DIR/${inst}.yaml"
+    elif [[ -f "$CONFIG_DIR/${inst}.json" ]]; then echo "$CONFIG_DIR/${inst}.json"
+    else echo ""
+    fi
+}
 
 _list_all_instances() {
-    # برمیگردونه لیست تمام INSTANCE_NAME های موجود
-    local pattern="$SYSTEMD_DIR/DaggerConnect-*.service"
-    local arr=()
-    for f in $pattern; do
+    for f in "$SYSTEMD_DIR"/DaggerConnect-*.service; do
         [[ -f "$f" ]] || continue
-        local name
-        name=$(basename "$f" .service)
-        name="${name#DaggerConnect-}"
-        [[ -n "$name" ]] && arr+=("$name")
+        local n; n=$(basename "$f" .service); n="${n#DaggerConnect-}"
+        [[ -n "$n" ]] && echo "$n"
     done
-    printf '%s\n' "${arr[@]}"
 }
 
 # ============================================================================
-# AUTOMATIC SERVER — با نام دلخواه
+# INSTALL SERVER
 # ============================================================================
 
-install_server_automatic() {
+install_server() {
     show_banner
     section "Server Setup"
 
-    # ── انتخاب نام instance ──────────────────────────────────────────────────
     local INSTANCE_NAME
     INSTANCE_NAME=$(_pick_instance_name "server" "server")
 
     read -rp "  Tunnel port [2020]: " LISTEN_PORT || true
     LISTEN_PORT=${LISTEN_PORT:-2020}
-
-    if ! [[ "$LISTEN_PORT" =~ ^[0-9]+$ ]] || [[ "$LISTEN_PORT" -lt 1 || "$LISTEN_PORT" -gt 65535 ]]; then
-        err "Invalid port number. Using default 2020."
-        LISTEN_PORT=2020
+    if ! [[ "$LISTEN_PORT" =~ ^[0-9]+$ ]] || \
+       [[ "$LISTEN_PORT" -lt 1 || "$LISTEN_PORT" -gt 65535 ]]; then
+        err "Invalid port. Using 2020."; LISTEN_PORT=2020
     fi
 
     if ! check_port_available "$LISTEN_PORT"; then
-        read -rp "  Port ${LISTEN_PORT} is busy. Use it anyway? [y/N]: " frc || true
-        if [[ ! $frc =~ ^[Yy]$ ]]; then
-            install_server_automatic
-            return
-        fi
+        read -rp "  Port busy. Use anyway? [y/N]: " frc || true
+        [[ ! $frc =~ ^[Yy]$ ]] && install_server && return
     fi
 
     while true; do
         read -rsp "  PSK: " PSK || true; echo ""
-        [[ -n "$PSK" ]] && break
-        err "PSK cannot be empty!"
+        [[ -n "$PSK" ]] && break; err "PSK cannot be empty!"
     done
 
     TRANSPORT=$(select_transport)
+    select_preset
+    local PROFILE="$PRESET_PROFILE" HEARTBEAT="$PRESET_HEARTBEAT"
+    select_log_settings
+    local LOG_LVL="$LOG_LEVEL"
 
-    if [[ "$TRANSPORT" == "tun" ]]; then
-        configure_tun_transport "server"
-        _TT_HEALTH_PORT="$LISTEN_PORT"
-    fi
+    local CFG_FORMAT="json"
 
-    if [[ "$TRANSPORT" == "daggermux" ]]; then
-        configure_daggermux "server"
-        setup_daggermux_iptables "$LISTEN_PORT"
-    fi
+    # Per-transport configuration prompts
+    case "$TRANSPORT" in
+        rawmux)     configure_rawmux ;;
+        quantummux) configure_quantummux "server"; setup_quantummux_iptables "$LISTEN_PORT" ;;
+        tunmux)     configure_tunmux "server"; setup_tunmux_iptables "$LISTEN_PORT" "$_TM_PROFILE" ;;
+    esac
 
-    if [[ "$TRANSPORT" == "rawmux" ]]; then
-        configure_rawmux
-    fi
-
-    if [[ "$TRANSPORT" == "quantummux" ]]; then
-        configure_quantummux "server"
-        setup_quantummux_iptables "$LISTEN_PORT"
-    fi
-
-    local AUTO_MAPPINGS=""
-    _CURRENT_TRANSPORT="$TRANSPORT"
     build_port_mappings
-    AUTO_MAPPINGS="$MAPPINGS"
-
-    CERT_FILE=""
-    KEY_FILE=""
+    local AUTO_MAPPINGS="$MAPPINGS"
+    CERT_FILE=""; KEY_FILE=""
 
     if [[ "$TRANSPORT" == "httpsmux" || "$TRANSPORT" == "wssmux" ]]; then
-        read -rp "  Domain for SSL cert [www.google.com]: " CD || true
-        CD=${CD:-www.google.com}
-
+        read -rp "  Domain for SSL cert [www.google.com]: " CD || true; CD=${CD:-www.google.com}
         if gen_ssl_cert "$CONFIG_DIR/certs/${INSTANCE_NAME}_cert.pem" \
                         "$CONFIG_DIR/certs/${INSTANCE_NAME}_key.pem" "$CD"; then
             CERT_FILE="$CONFIG_DIR/certs/${INSTANCE_NAME}_cert.pem"
@@ -1261,281 +964,118 @@ install_server_automatic() {
         fi
     fi
 
-    CONFIG_FILE="$CONFIG_DIR/${INSTANCE_NAME}.yaml"
+    local CONFIG_FILE="$CONFIG_DIR/${INSTANCE_NAME}.${CFG_FORMAT}"
     mkdir -p "$CONFIG_DIR"
 
-    {
-        echo "mode: \"server\""
-        echo "psk: \"${PSK}\""
-        echo "profile: \"latency\""
-        echo "verbose: true"
-        echo "heartbeat: 2"
-        echo ""
-
-        if [[ -n "$CERT_FILE" && -f "$CERT_FILE" ]]; then
-            echo "cert_file: \"${CERT_FILE}\""
-            echo "key_file: \"${KEY_FILE}\""
-            echo ""
-        fi
-
-        echo "listeners:"
-        echo "  - addr: \"0.0.0.0:${LISTEN_PORT}\""
-        echo "    transport: \"${TRANSPORT}\""
-
-        if [[ -n "$CERT_FILE" && -f "$CERT_FILE" ]]; then
-            echo "    cert_file: \"${CERT_FILE}\""
-            echo "    key_file: \"${KEY_FILE}\""
-        fi
-
-        if [[ -n "$AUTO_MAPPINGS" ]]; then
-            echo "    maps:"
-            printf '%b' "$AUTO_MAPPINGS" | sed 's/^/    /'
-        fi
-    } > "$CONFIG_FILE"
-
-    _write_transport_extras "$CONFIG_FILE" "server" "$TRANSPORT"
-    write_common_tail "$CONFIG_FILE"
-
-    create_systemd_service "server" "$INSTANCE_NAME"
-
-    if [[ "$TRANSPORT" == "tun" ]]; then
-        show_tun_transport_notes "server"
+    # Build MAPS JSON fragment from MAPPINGS string
+    local MAPS_JSON="[]"
+    if [[ -n "$AUTO_MAPPINGS" ]]; then
+        MAPS_JSON=$(printf '%b' "$AUTO_MAPPINGS" | python3 -c '
+import sys, json, re
+items = []
+for line in sys.stdin:
+    line = line.strip()
+    m = re.match(r"- type: (.+)", line)
+    if m: cur={"type":m.group(1)}; items.append(cur)
+    m = re.match(r"bind: \"(.+)\"", line)
+    if m and items: items[-1]["bind"]=m.group(1)
+    m = re.match(r"target: \"(.+)\"", line)
+    if m and items: items[-1]["target"]=m.group(1)
+print(json.dumps(items))
+')
     fi
 
-    read -rp "  Optimize system? [Y/n]: " opt || true
-    [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "iran" || true
+    # Emit base JSON config (mode, psk, profile, listener, quantummux if applicable)
+    python3 - > "$CONFIG_FILE" << PEOF
+import json
 
+TRANSPORT     = "$TRANSPORT"
+QM_SPOOF_IP   = "$_QM_SPOOF_SRC_IP"
+QM_SPOOF_MAC  = "$_QM_SPOOF_SRC_MAC"
+QM_CLI_SPOOF  = "$_QM_CLIENT_SPOOF_IP"
+QM_CLI_REAL   = "$_QM_CLIENT_REAL_IP"
+
+cfg = {
+  "mode": "server",
+  "psk": ${PSK@Q},
+  "profile": "$PROFILE",
+  "log_level": "$LOG_LVL",
+  "heartbeat": $HEARTBEAT,
+}
+CERT = "$CERT_FILE"
+KEY  = "$KEY_FILE"
+if CERT:
+    cfg["cert_file"] = CERT
+    cfg["key_file"]  = KEY
+
+listener = {
+  "addr": "0.0.0.0:$LISTEN_PORT",
+  "transport": TRANSPORT,
+  "maps": $MAPS_JSON,
+}
+if CERT:
+    listener["cert_file"] = CERT
+    listener["key_file"]  = KEY
+
+# Per-listener spoof passthrough (quantummux + tunmux share these fields on listener too)
+if TRANSPORT in ("quantummux", "tunmux"):
+    if TRANSPORT == "quantummux":
+        if QM_CLI_SPOOF: listener["client_spoof_ip"] = QM_CLI_SPOOF
+        if QM_CLI_REAL:  listener["client_real_ip"]  = QM_CLI_REAL
+    else:  # tunmux
+        TM_CLI_SPOOF = "$_TM_CLIENT_SPOOF_IP"
+        TM_CLI_REAL  = "$_TM_CLIENT_REAL_IP"
+        if TM_CLI_SPOOF: listener["client_spoof_ip"] = TM_CLI_SPOOF
+        if TM_CLI_REAL:  listener["client_real_ip"]  = TM_CLI_REAL
+
+cfg["listeners"] = [listener]
+
+# QuantumMux block (only emit fields that have values — spoof is fully optional)
+if TRANSPORT == "quantummux":
+    qm = {"data_shard": 10, "parity_shard": 1}
+    if "$_QM_IFACE":    qm["interface"]  = "$_QM_IFACE"
+    if "$_QM_LOCAL_IP": qm["local_ip"]   = "$_QM_LOCAL_IP"
+    if QM_SPOOF_IP:     qm["spoof_src_ip"]    = QM_SPOOF_IP
+    if QM_SPOOF_MAC:    qm["spoof_src_mac"]   = QM_SPOOF_MAC
+    if QM_CLI_SPOOF:    qm["client_spoof_ip"] = QM_CLI_SPOOF
+    if QM_CLI_REAL:     qm["client_real_ip"]  = QM_CLI_REAL
+    qm["use_pcap"] = "$_QM_USE_PCAP" == "true"
+    if "$_QM_MTU":
+        try: qm["mtu"] = int("$_QM_MTU")
+        except ValueError: pass
+    if "$_QM_ICMPV6_MODE"  == "true": qm["icmpv6_mode"]  = True
+    if "$_QM_NATURAL_SEND" == "true": qm["natural_send"] = True
+    cfg["quantummux"] = qm
+
+print(json.dumps(cfg, indent=2))
+PEOF
+
+    # Inject transport-specific blocks (tunmux/rawmux)
+    _write_transport_extras "$CONFIG_FILE" "server" "$TRANSPORT"
+    write_preset_tail "$CONFIG_FILE" "$PROFILE" "$HEARTBEAT"
+    create_systemd_service "server" "$INSTANCE_NAME" "$CONFIG_FILE"
+
+    read -rp "  Optimize system? [Y/n]: " v || true
+    [[ ! $v =~ ^[Nn]$ ]] && optimize_system "iran" || true
     safe_start_enable "DaggerConnect-${INSTANCE_NAME}"
 
-    echo ""
-    divider
+    echo ""; divider
     ok "Server '${INSTANCE_NAME}' configured!"
     info "Service:   ${GREEN}DaggerConnect-${INSTANCE_NAME}${NC}"
     info "Port:      ${GREEN}${LISTEN_PORT}${NC}"
     info "Transport: ${GREEN}${TRANSPORT}${NC}"
+    [[ "$TRANSPORT" == "tunmux" ]] && info "Profile:   ${GREEN}${_TM_PROFILE}${NC}"
+    info "Preset:    ${GREEN}${PROFILE}${NC}"
     info "Config:    ${CONFIG_FILE}"
     info "Logs:      journalctl -u DaggerConnect-${INSTANCE_NAME} -f"
-    divider
-
-    press_enter
-    main_menu
-}
-
-# ============================================================================
-# MULTI-LISTENER SERVER — با نام دلخواه
-# ============================================================================
-
-install_server_multilistener() {
-    show_banner
-    section "Multi-Listener Server Setup"
-    echo -e "  ${DIM}Each listener is fully isolated — own sessions, own TUN.${NC}"
-    echo ""
-
-    local INSTANCE_NAME
-    INSTANCE_NAME=$(_pick_instance_name "server" "server-multi")
-
-    while true; do
-        read -rsp "  Global PSK: " GLOBAL_PSK || true; echo ""
-        [[ -n "$GLOBAL_PSK" ]] && break; err "PSK cannot be empty!"
-    done
-
-    echo ""
-    echo -e "  Profile: ${WHITE}1)${NC}balanced  ${WHITE}2)${NC}aggressive  ${WHITE}3)${NC}latency  ${WHITE}4)${NC}cpu-efficient  ${WHITE}5)${NC}gaming"
-    read -rp "  Choice [1]: " pc || true
-    case $pc in
-        2) PROFILE="aggressive";; 3) PROFILE="latency";;
-        4) PROFILE="cpu-efficient";; 5) PROFILE="gaming";; *) PROFILE="balanced";;
-    esac
-
-    read -rp "  Heartbeat (s) [10]: " HB || true; HB=${HB:-10}
-    read -rp "  Verbose? [y/N]: " VB || true
-    [[ $VB =~ ^[Yy]$ ]] && VERBOSE="true" || VERBOSE="false"
-
-    GLOBAL_CERT=""; GLOBAL_KEY=""
-    read -rp "  Generate global SSL cert? [y/N]: " GC || true
-    if [[ $GC =~ ^[Yy]$ ]]; then
-        read -rp "  Domain [www.google.com]: " CD || true; CD=${CD:-www.google.com}
-        if gen_ssl_cert "$CONFIG_DIR/certs/cert.pem" "$CONFIG_DIR/certs/key.pem" "$CD"; then
-            GLOBAL_CERT="$CONFIG_DIR/certs/cert.pem"
-            GLOBAL_KEY="$CONFIG_DIR/certs/key.pem"
-        else
-            warn "Global SSL cert failed — listeners needing TLS will prompt individually."
-        fi
-    fi
-
-    CONFIG_FILE="$CONFIG_DIR/${INSTANCE_NAME}.yaml"
-    mkdir -p "$CONFIG_DIR"
-
-    {
-        echo "mode: \"server\""
-        echo "psk: \"${GLOBAL_PSK}\""
-        echo "profile: \"${PROFILE}\""
-        echo "verbose: ${VERBOSE}"
-        echo "heartbeat: ${HB}"
-        echo ""
-        if [[ -n "$GLOBAL_CERT" && -f "$GLOBAL_CERT" ]]; then
-            echo "cert_file: \"${GLOBAL_CERT}\""
-            echo "key_file: \"${GLOBAL_KEY}\""
-            echo ""
-        fi
-        echo "listeners:"
-    } > "$CONFIG_FILE"
-
-    local LISTENER_COUNT=0
-    local HAS_DAGGERMUX=false HAS_RAWMUX=false HAS_TUN=false HAS_QUANTUMMUX=false
-
-    while true; do
-        echo ""; echo -e "  ${PURPLE}== Listener #${LISTENER_COUNT} ==${NC}"
-
-        read -rp "  Bind address [0.0.0.0:$((4000+LISTENER_COUNT))]: " L_ADDR || true
-        L_ADDR=${L_ADDR:-"0.0.0.0:$((4000+LISTENER_COUNT))"}
-
-        L_TRANSPORT=$(select_transport)
-
-        L_CERT=""; L_KEY=""
-        if [[ "$L_TRANSPORT" == "httpsmux" || "$L_TRANSPORT" == "wssmux" ]]; then
-            if [[ -n "$GLOBAL_CERT" && -f "$GLOBAL_CERT" ]]; then
-                L_CERT="$GLOBAL_CERT"; L_KEY="$GLOBAL_KEY"; ok "Using global SSL cert."
-            else
-                read -rp "  Generate cert for listener #${LISTENER_COUNT}? [Y/n]: " GLC || true
-                if [[ ! $GLC =~ ^[Nn]$ ]]; then
-                    read -rp "  Domain [www.google.com]: " LCD || true; LCD=${LCD:-www.google.com}
-                    if gen_ssl_cert "$CONFIG_DIR/certs/cert_${LISTENER_COUNT}.pem" \
-                                    "$CONFIG_DIR/certs/key_${LISTENER_COUNT}.pem" "$LCD"; then
-                        L_CERT="$CONFIG_DIR/certs/cert_${LISTENER_COUNT}.pem"
-                        L_KEY="$CONFIG_DIR/certs/key_${LISTENER_COUNT}.pem"
-                    else
-                        warn "Cert failed for listener #${LISTENER_COUNT} — continuing without TLS."
-                    fi
-                fi
-            fi
-        fi
-
-        if [[ "$L_TRANSPORT" == "daggermux" ]]; then
-            L_PORT=$(echo "$L_ADDR" | cut -d: -f2)
-            if [[ -z "$L_PORT" ]] || ! [[ "$L_PORT" =~ ^[0-9]+$ ]]; then
-                err "Could not parse port from address '${L_ADDR}'. Skipping iptables."
-            else
-                configure_daggermux "server"
-                setup_daggermux_iptables "$L_PORT"
-            fi
-            HAS_DAGGERMUX=true
-        fi
-
-        if [[ "$L_TRANSPORT" == "rawmux" ]]; then
-            configure_rawmux
-            HAS_RAWMUX=true
-        fi
-
-        if [[ "$L_TRANSPORT" == "tun" ]]; then
-            configure_tun_transport "server"
-            local L_PORT_TUN; L_PORT_TUN=$(echo "$L_ADDR" | cut -d: -f2)
-            [[ "$L_PORT_TUN" =~ ^[0-9]+$ ]] && _TT_HEALTH_PORT="$L_PORT_TUN" || true
-            HAS_TUN=true
-        fi
-
-        if [[ "$L_TRANSPORT" == "quantummux" ]]; then
-            L_PORT=$(echo "$L_ADDR" | cut -d: -f2)
-            if [[ -z "$L_PORT" ]] || ! [[ "$L_PORT" =~ ^[0-9]+$ ]]; then
-                err "Could not parse port from address '${L_ADDR}'. Skipping iptables."
-            else
-                configure_quantummux "server"
-                setup_quantummux_iptables "$L_PORT"
-            fi
-            HAS_QUANTUMMUX=true
-        fi
-
-        L_MAPPINGS=""
-        _CURRENT_TRANSPORT="$L_TRANSPORT"
-        build_port_mappings; L_MAPPINGS="$MAPPINGS"
-
-        read -rp "  Enable per-listener smux TUN? [y/N]: " L_TUN_EN || true
-        L_TUN_ENABLED=false
-        if [[ $L_TUN_EN =~ ^[Yy]$ ]]; then
-            L_TUN_ENABLED=true; configure_tun "$LISTENER_COUNT" "server"
-        fi
-
-        {
-            echo "  - addr: \"${L_ADDR}\""
-            echo "    transport: \"${L_TRANSPORT}\""
-            if [[ -n "$L_CERT" && -f "$L_CERT" ]]; then
-                echo "    cert_file: \"${L_CERT}\""
-                echo "    key_file: \"${L_KEY}\""
-            fi
-            if [[ -n "$L_MAPPINGS" ]]; then
-                echo "    maps:"
-                printf '%b' "$L_MAPPINGS" | sed 's/^/    /'
-            fi
-            if $L_TUN_ENABLED; then
-                echo "    tun:"
-                echo "      enabled: true"
-                echo "      name: \"${_TUN_NAME}\""
-                echo "      local_ip: \"${_TUN_LOCAL}\""
-                echo "      peer_ip: \"${_TUN_PEER}\""
-                echo "      mtu: ${_TUN_MTU}"
-            fi
-        } >> "$CONFIG_FILE"
-
-        LISTENER_COUNT=$((LISTENER_COUNT+1))
-        ok "Listener #$((LISTENER_COUNT-1)): ${L_ADDR} (${L_TRANSPORT}) added."
-
-        read -rp "  Add another listener? [y/N]: " ML || true
-        [[ ! $ML =~ ^[Yy]$ ]] && break
-    done
-
-    $HAS_DAGGERMUX  && write_daggermux_config    "$CONFIG_FILE" "server" || true
-    $HAS_RAWMUX     && write_rawmux_config        "$CONFIG_FILE"          || true
-    $HAS_TUN        && write_tun_transport_config "$CONFIG_FILE" "server" || true
-    $HAS_QUANTUMMUX && write_quantummux_config    "$CONFIG_FILE" "server" || true
-
-    write_common_tail "$CONFIG_FILE"
-    create_systemd_service "server" "$INSTANCE_NAME"
-
-    if $HAS_TUN; then
-        show_tun_transport_notes "server"
-    fi
-
-    read -rp "  Optimize system? [Y/n]: " opt || true
-    [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "iran" || true
-
-    safe_start_enable "DaggerConnect-${INSTANCE_NAME}"
-
-    echo ""; divider
-    ok "Multi-Listener Server '${INSTANCE_NAME}' configured!"
-    info "Service:   ${GREEN}DaggerConnect-${INSTANCE_NAME}${NC}"
-    info "Listeners: ${GREEN}${LISTENER_COUNT}${NC}"
-    info "Config:    ${CONFIG_FILE}"
-    info "Logs:      journalctl -u DaggerConnect-${INSTANCE_NAME} -f"
-    $HAS_DAGGERMUX  && warn "DaggerMux: iptables rules applied." || true
-    $HAS_QUANTUMMUX && warn "QuantumMux: iptables rules applied." || true
-    $HAS_TUN        && warn "TUN transport: tun module loaded (modprobe tun)." || true
     divider; press_enter; main_menu
 }
 
 # ============================================================================
-# SERVER ENTRY
+# INSTALL CLIENT
 # ============================================================================
 
-install_server() {
-    show_banner
-    section "Server Configuration"
-
-    echo -e "  ${WHITE}1)${NC} Automatic      — Single listener ${GREEN}(Recommended)${NC}"
-    echo -e "  ${WHITE}2)${NC} Multi-Listener — Multiple isolated listeners"
-    echo ""
-    read -rp "  Choice [1-2]: " cm || true
-
-    case $cm in
-        2) install_server_multilistener ;;
-        *) install_server_automatic     ;;
-    esac
-}
-
-# ============================================================================
-# AUTOMATIC CLIENT — با نام دلخواه
-# ============================================================================
-
-install_client_automatic() {
+install_client() {
     show_banner
     section "Client Setup"
 
@@ -1544,316 +1084,102 @@ install_client_automatic() {
 
     while true; do
         read -rsp "  PSK (must match server): " PSK || true; echo ""
-        [[ -n "$PSK" ]] && break
-        err "PSK cannot be empty!"
+        [[ -n "$PSK" ]] && break; err "PSK cannot be empty!"
     done
 
     TRANSPORT=$(select_transport)
 
     read -rp "  Server address:port [e.g., 1.2.3.4:2020]: " ADDR || true
-
     if [[ -z "$ADDR" || "$ADDR" != *:* ]]; then
-        err "Address must be in host:port format."
-        install_client_automatic
-        return
+        err "Address must be host:port format."; install_client; return
     fi
 
-    if [[ "$TRANSPORT" == "tun" ]]; then
-        local SERVER_HOST
-        SERVER_HOST=$(echo "$ADDR" | cut -d: -f1)
-        local SERVER_PORT; SERVER_PORT=$(echo "$ADDR" | cut -d: -f2)
-        configure_tun_transport "client"
-        [[ -z "${_TT_DEST_IP:-}" ]] && _TT_DEST_IP="$SERVER_HOST"
-        [[ "$SERVER_PORT" =~ ^[0-9]+$ ]] && _TT_HEALTH_PORT="$SERVER_PORT" || true
-    fi
+    select_preset
+    local PROFILE="$PRESET_PROFILE" HEARTBEAT="$PRESET_HEARTBEAT"
 
-    if [[ "$TRANSPORT" == "daggermux" ]]; then
-        configure_daggermux "client"
-    fi
-
-    if [[ "$TRANSPORT" == "rawmux" ]]; then
-        configure_rawmux
-    fi
-
-    if [[ "$TRANSPORT" == "quantummux" ]]; then
-        configure_quantummux "client"
-    fi
-
-    CONFIG_FILE="$CONFIG_DIR/${INSTANCE_NAME}.yaml"
-    mkdir -p "$CONFIG_DIR"
-
-    {
-        echo "mode: \"client\""
-        echo "psk: \"${PSK}\""
-        echo "profile: \"latency\""
-        echo "verbose: true"
-        echo "heartbeat: 2"
-        echo ""
-        echo "paths:"
-        echo "  - transport: \"${TRANSPORT}\""
-        echo "    addr: \"${ADDR}\""
-        if [[ "$TRANSPORT" == "tun" ]]; then
-            echo "    connection_pool: 1"
-        else
-            echo "    connection_pool: 3"
-            echo "    aggressive_pool: true"
-        fi
-        echo "    retry_interval: 1"
-        echo "    dial_timeout: 5"
-    } > "$CONFIG_FILE"
-
-    _write_transport_extras "$CONFIG_FILE" "client" "$TRANSPORT"
-    write_common_tail "$CONFIG_FILE"
-
-    create_systemd_service "client" "$INSTANCE_NAME"
-
-    if [[ "$TRANSPORT" == "tun" ]]; then
-        show_tun_transport_notes "client"
-    fi
-
-    safe_start_enable "DaggerConnect-${INSTANCE_NAME}"
-
-    echo ""
-    divider
-    ok "Client '${INSTANCE_NAME}' configured!"
-    info "Service:   ${GREEN}DaggerConnect-${INSTANCE_NAME}${NC}"
-    info "Server:    ${GREEN}${ADDR}${NC}"
-    info "Transport: ${GREEN}${TRANSPORT}${NC}"
-    info "Config:    ${CONFIG_FILE}"
-    info "Logs:      journalctl -u DaggerConnect-${INSTANCE_NAME} -f"
-    divider
-
-    press_enter
-    main_menu
-}
-
-# ============================================================================
-# MULTI-PATH CLIENT — با نام دلخواه
-# ============================================================================
-
-install_client_multipaths() {
-    show_banner
-    section "Multi-Path Client Setup"
-    echo -e "  ${DIM}Each path can have its own PSK and transport.${NC}"
-    echo ""
-
-    local INSTANCE_NAME
-    INSTANCE_NAME=$(_pick_instance_name "client" "client-multi")
-
-    while true; do
-        read -rsp "  Global PSK: " GLOBAL_PSK || true; echo ""
-        [[ -n "$GLOBAL_PSK" ]] && break; err "PSK cannot be empty!"
-    done
-
-    echo ""
-    echo -e "  Profile: ${WHITE}1)${NC}balanced  ${WHITE}2)${NC}aggressive  ${WHITE}3)${NC}latency  ${WHITE}4)${NC}cpu-efficient  ${WHITE}5)${NC}gaming"
-    read -rp "  Choice [1]: " pc || true
-    case $pc in
-        2) PROFILE="aggressive";; 3) PROFILE="latency";;
-        4) PROFILE="cpu-efficient";; 5) PROFILE="gaming";; *) PROFILE="balanced";;
+    case "$TRANSPORT" in
+        rawmux)     configure_rawmux ;;
+        quantummux) configure_quantummux "client" ;;
+        tunmux)     configure_tunmux "client" ;;
     esac
 
-    read -rp "  Heartbeat (s) [10]: " HB || true; HB=${HB:-10}
-    read -rp "  Verbose? [y/N]: " VB || true
-    [[ $VB =~ ^[Yy]$ ]] && VERBOSE="true" || VERBOSE="false"
+    select_log_settings
+    local LOG_LVL="$LOG_LEVEL"
 
-    read -rp "  Enable obfuscation? [Y/n]: " OBE || true
-    local OBFUS_ENABLED OP1 OP2
-    if [[ ! $OBE =~ ^[Nn]$ ]]; then
-        OBFUS_ENABLED="true"
-        read -rp "  Min padding [16]:  " OP1 || true; OP1=${OP1:-16}
-        read -rp "  Max padding [512]: " OP2 || true; OP2=${OP2:-512}
-    else
-        OBFUS_ENABLED="false"; OP1=16; OP2=512
-    fi
-
-    CONFIG_FILE="$CONFIG_DIR/${INSTANCE_NAME}.yaml"
+    local CFG_FORMAT="json"
+    local POOL=3 AGGRESSIVE="true"
+    local CONFIG_FILE="$CONFIG_DIR/${INSTANCE_NAME}.${CFG_FORMAT}"
     mkdir -p "$CONFIG_DIR"
 
-    {
-        echo "mode: \"client\""
-        echo "psk: \"${GLOBAL_PSK}\""
-        echo "profile: \"${PROFILE}\""
-        echo "verbose: ${VERBOSE}"
-        echo "heartbeat: ${HB}"
-        echo ""
-        echo "paths:"
-    } > "$CONFIG_FILE"
+    python3 - > "$CONFIG_FILE" << PEOF
+import json
 
-    local PATH_COUNT=0
-    local HAS_DAGGERMUX=false HAS_RAWMUX=false HAS_TUN=false HAS_QUANTUMMUX=false
+TRANSPORT     = "$TRANSPORT"
+QM_SPOOF_IP   = "$_QM_SPOOF_SRC_IP"
+QM_SPOOF_MAC  = "$_QM_SPOOF_SRC_MAC"
+QM_SRV_SPOOF  = "$_QM_SERVER_SPOOF_IP"
+TM_SRV_SPOOF  = "$_TM_SERVER_SPOOF_IP"
 
-    while true; do
-        echo ""; echo -e "  ${PURPLE}== Path #${PATH_COUNT} ==${NC}"
+path_entry = {
+  "transport": TRANSPORT,
+  "addr": "$ADDR",
+  "connection_pool": $POOL,
+  "aggressive_pool": $( [[ "$AGGRESSIVE" == "true" ]] && echo "True" || echo "False" ),
+  "retry_interval": 1,
+  "dial_timeout": 5,
+}
+# Per-path server_spoof_ip (used by quantummux and tunmux)
+if TRANSPORT == "quantummux" and QM_SRV_SPOOF:
+    path_entry["server_spoof_ip"] = QM_SRV_SPOOF
+elif TRANSPORT == "tunmux" and TM_SRV_SPOOF:
+    path_entry["server_spoof_ip"] = TM_SRV_SPOOF
 
-        P_TRANSPORT=$(select_transport)
+cfg = {
+  "mode": "client",
+  "psk": ${PSK@Q},
+  "profile": "$PROFILE",
+  "log_level": "$LOG_LVL",
+  "heartbeat": $HEARTBEAT,
+  "paths": [path_entry],
+}
 
-        read -rp "  Server address:port: " P_ADDR || true
-        [[ -z "$P_ADDR" ]] && err "Cannot be empty!" && continue
+# QuantumMux block
+if TRANSPORT == "quantummux":
+    qm = {"data_shard": 10, "parity_shard": 1}
+    if "$_QM_IFACE":      qm["interface"]   = "$_QM_IFACE"
+    if "$_QM_LOCAL_IP":   qm["local_ip"]    = "$_QM_LOCAL_IP"
+    if "$_QM_ROUTER_MAC": qm["router_mac"]  = "$_QM_ROUTER_MAC"
+    if QM_SPOOF_IP:       qm["spoof_src_ip"]    = QM_SPOOF_IP
+    if QM_SPOOF_MAC:      qm["spoof_src_mac"]   = QM_SPOOF_MAC
+    if QM_SRV_SPOOF:      qm["server_spoof_ip"] = QM_SRV_SPOOF
+    qm["use_pcap"] = "$_QM_USE_PCAP" == "true"
+    if "$_QM_MTU":
+        try: qm["mtu"] = int("$_QM_MTU")
+        except ValueError: pass
+    if "$_QM_ICMPV6_MODE"  == "true": qm["icmpv6_mode"]  = True
+    if "$_QM_NATURAL_SEND" == "true": qm["natural_send"] = True
+    cfg["quantummux"] = qm
 
-        if [[ "$P_ADDR" != *:* ]]; then
-            err "Address must be in host:port format."; continue
-        fi
+print(json.dumps(cfg, indent=2))
+PEOF
 
-        read -rsp "  Custom PSK? [blank = use global]: " P_PSK_RAW || true; echo ""
-        P_PSK=""
-        [[ -n "$P_PSK_RAW" ]] && P_PSK="$P_PSK_RAW" && ok "Custom PSK will be used." || true
-
-        if [[ "$P_TRANSPORT" == "tun" ]]; then
-            P_POOL=1
-            P_AGG_VAL="false"
-        else
-            read -rp "  Connection pool  [2]:  " P_POOL || true;  P_POOL=${P_POOL:-2}
-            read -rp "  Aggressive pool? [y/N]: " P_AGG || true
-            [[ $P_AGG =~ ^[Yy]$ ]] && P_AGG_VAL="true" || P_AGG_VAL="false"
-        fi
-        read -rp "  Retry interval (s) [3]:  " P_RETRY || true; P_RETRY=${P_RETRY:-3}
-        read -rp "  Dial timeout   (s) [10]: " P_DIAL || true;  P_DIAL=${P_DIAL:-10}
-
-        if [[ "$P_TRANSPORT" == "tun" ]]; then
-            local P_HOST; P_HOST=$(echo "$P_ADDR" | cut -d: -f1)
-            local P_PORT_TUN; P_PORT_TUN=$(echo "$P_ADDR" | cut -d: -f2)
-            configure_tun_transport "client"
-            [[ -z "${_TT_DEST_IP:-}" ]] && _TT_DEST_IP="$P_HOST"
-            [[ "$P_PORT_TUN" =~ ^[0-9]+$ ]] && _TT_HEALTH_PORT="$P_PORT_TUN" || true
-            HAS_TUN=true
-        fi
-        if [[ "$P_TRANSPORT" == "daggermux"  ]]; then configure_daggermux "client";  HAS_DAGGERMUX=true;  fi
-        if [[ "$P_TRANSPORT" == "rawmux"     ]]; then configure_rawmux;              HAS_RAWMUX=true;     fi
-        if [[ "$P_TRANSPORT" == "quantummux" ]]; then configure_quantummux "client"; HAS_QUANTUMMUX=true; fi
-
-        read -rp "  Enable per-path smux TUN? [y/N]: " P_TUN_EN || true
-        P_TUN_ENABLED=false
-        if [[ $P_TUN_EN =~ ^[Yy]$ ]]; then
-            P_TUN_ENABLED=true; configure_tun "$PATH_COUNT" "client"
-        fi
-
-        {
-            echo "  - transport: \"${P_TRANSPORT}\""
-            echo "    addr: \"${P_ADDR}\""
-            if [[ -n "$P_PSK" ]]; then
-                echo "    psk: \"${P_PSK}\""
-            fi
-            echo "    connection_pool: ${P_POOL}"
-            echo "    aggressive_pool: ${P_AGG_VAL}"
-            echo "    retry_interval: ${P_RETRY}"
-            echo "    dial_timeout: ${P_DIAL}"
-            if $P_TUN_ENABLED; then
-                echo "    tun:"
-                echo "      enabled: true"
-                echo "      name: \"${_TUN_NAME}\""
-                echo "      local_ip: \"${_TUN_LOCAL}\""
-                echo "      peer_ip: \"${_TUN_PEER}\""
-                echo "      mtu: ${_TUN_MTU}"
-            fi
-        } >> "$CONFIG_FILE"
-
-        PATH_COUNT=$((PATH_COUNT+1))
-        ok "Path #$((PATH_COUNT-1)): ${P_TRANSPORT} -> ${P_ADDR} added."
-
-        read -rp "  Add another path? [y/N]: " MP || true
-        [[ ! $MP =~ ^[Yy]$ ]] && break
-    done
-
-    $HAS_DAGGERMUX  && write_daggermux_config    "$CONFIG_FILE" "client" || true
-    $HAS_RAWMUX     && write_rawmux_config        "$CONFIG_FILE"          || true
-    $HAS_TUN        && write_tun_transport_config "$CONFIG_FILE" "client" || true
-    $HAS_QUANTUMMUX && write_quantummux_config    "$CONFIG_FILE" "client" || true
-
-    cat >> "$CONFIG_FILE" << EOF
-
-smux:
-  keepalive: 8
-  max_recv: 8388608
-  max_stream: 8388608
-  frame_size: 32768
-  version: 2
-
-kcp:
-  nodelay: 1
-  interval: 10
-  resend: 2
-  nc: 1
-  sndwnd: 1024
-  rcvwnd: 1024
-  mtu: 1400
-
-advanced:
-  tcp_nodelay: true
-  tcp_keepalive: 15
-  tcp_read_buffer: 4194304
-  tcp_write_buffer: 4194304
-  websocket_read_buffer: 65536
-  websocket_write_buffer: 65536
-  websocket_compression: false
-  cleanup_interval: 3
-  session_timeout: 60
-  connection_timeout: 30
-  stream_timeout: 120
-  max_connections: 2000
-  max_udp_flows: 1000
-  udp_flow_timeout: 300
-  udp_buffer_size: 4194304
-
-obfuscation:
-  enabled: ${OBFUS_ENABLED}
-  min_padding: ${OP1}
-  max_padding: ${OP2}
-  min_delay_ms: 0
-  max_delay_ms: 0
-  burst_chance: 0.15
-
-http_mimic:
-  fake_domain: "www.google.com"
-  fake_path: "/search"
-  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-  chunked_encoding: false
-  session_cookie: true
-  custom_headers:
-    - "Accept-Language: en-US,en;q=0.9"
-    - "Accept-Encoding: gzip, deflate, br"
-EOF
-
-    create_systemd_service "client" "$INSTANCE_NAME"
-
-    if $HAS_TUN; then
-        show_tun_transport_notes "client"
-    fi
-
-    read -rp "  Optimize system? [Y/n]: " opt || true
-    [[ ! $opt =~ ^[Nn]$ ]] && optimize_system "foreign" || true
+    # Inject tunmux/rawmux blocks (handles all the optional tunmux fields)
+    _write_transport_extras "$CONFIG_FILE" "client" "$TRANSPORT"
+    write_preset_tail "$CONFIG_FILE" "$PROFILE" "$HEARTBEAT"
+    create_systemd_service "client" "$INSTANCE_NAME" "$CONFIG_FILE"
 
     safe_start_enable "DaggerConnect-${INSTANCE_NAME}"
 
     echo ""; divider
-    ok "Multi-Path Client '${INSTANCE_NAME}' configured!"
-    info "Service: ${GREEN}DaggerConnect-${INSTANCE_NAME}${NC}"
-    info "Paths:   ${GREEN}${PATH_COUNT}${NC}"
-    info "Config:  ${CONFIG_FILE}"
-    info "Logs:    journalctl -u DaggerConnect-${INSTANCE_NAME} -f"
-    $HAS_DAGGERMUX  && warn "DaggerMux: ensure server has iptables rules applied." || true
-    $HAS_QUANTUMMUX && warn "QuantumMux: ensure server has iptables rules applied." || true
-    $HAS_TUN        && warn "TUN transport: tun module loaded (modprobe tun)."     || true
+    ok "Client '${INSTANCE_NAME}' configured!"
+    info "Service:   ${GREEN}DaggerConnect-${INSTANCE_NAME}${NC}"
+    info "Server:    ${GREEN}${ADDR}${NC}"
+    info "Transport: ${GREEN}${TRANSPORT}${NC}"
+    [[ "$TRANSPORT" == "tunmux" ]] && info "Profile:   ${GREEN}${_TM_PROFILE}${NC}"
+    info "Preset:    ${GREEN}${PROFILE}${NC}"
+    info "Config:    ${CONFIG_FILE}"
+    info "Logs:      journalctl -u DaggerConnect-${INSTANCE_NAME} -f"
     divider; press_enter; main_menu
-}
-
-# ============================================================================
-# CLIENT ENTRY
-# ============================================================================
-
-install_client() {
-    show_banner
-    section "Client Configuration"
-
-    echo -e "  ${WHITE}1)${NC} Automatic  — Single path ${GREEN}(Recommended)${NC}"
-    echo -e "  ${WHITE}2)${NC} Multi-Path — Multiple paths with per-PSK"
-    echo ""
-    read -rp "  Choice [1-2]: " cm || true
-
-    case $cm in
-        2) install_client_multipaths ;;
-        *) install_client_automatic  ;;
-    esac
 }
 
 # ============================================================================
@@ -1863,65 +1189,44 @@ install_client() {
 update_binary() {
     show_banner
     section "Update Core Binary"
-
     local CURRENT_VERSION; CURRENT_VERSION=$(get_current_version)
     if [[ "$CURRENT_VERSION" == "not-installed" ]]; then
         err "DaggerConnect is not installed yet."; press_enter; main_menu; return
     fi
-
     info "Current version: ${GREEN}${CURRENT_VERSION}${NC}"
-
-    # بررسی سریع دسترسی به GitHub (timeout کوتاه)
     local LATEST_VERSION=""
-    local API_RESPONSE=""
-    API_RESPONSE=$(curl -s --connect-timeout 4 --max-time 6 "$LATEST_RELEASE_API" 2>/dev/null || true)
-    LATEST_VERSION=$(echo "$API_RESPONSE" | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    tag = data.get('tag_name', '')
-    if tag and any(c.isdigit() for c in tag):
-        print(tag)
-except:
-    pass
-" 2>/dev/null || true)
-
+    if curl -s --connect-timeout 4 --max-time 6 "$LATEST_RELEASE_API" &>/dev/null; then
+        LATEST_VERSION=$(curl -s --connect-timeout 4 --max-time 6 "$LATEST_RELEASE_API" \
+            | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    fi
     if [[ -n "$LATEST_VERSION" ]]; then
         info "Latest on GitHub: ${GREEN}${LATEST_VERSION}${NC}"
         if [[ "$CURRENT_VERSION" == "$LATEST_VERSION" ]]; then
-            ok "Already on the latest version (${CURRENT_VERSION})."
-            read -rp "  Force re-download anyway? [y/N]: " force || true
-            [[ ! $force =~ ^[Yy]$ ]] && press_enter && main_menu && return
+            ok "Already on the latest version."; read -rp "  Force re-download? [y/N]: " v || true
+            [[ ! $v =~ ^[Yy]$ ]] && press_enter && main_menu && return
         fi
     else
-        warn "GitHub unreachable — will download from direct server."
+        warn "GitHub unreachable -- will download from direct server."
     fi
-
-    read -rp "  Continue with update? [y/N]: " c || true
-    [[ ! $c =~ ^[Yy]$ ]] && main_menu && return
-
-    # توقف همه سرویس‌های فعال
+    read -rp "  Continue with update? [y/N]: " v || true
+    [[ ! $v =~ ^[Yy]$ ]] && main_menu && return
     while IFS= read -r inst; do
         systemctl stop "DaggerConnect-${inst}" 2>/dev/null || true
     done < <(_list_all_instances)
     sleep 1
-
     download_binary
     local NEW_VERSION; NEW_VERSION=$(get_current_version)
     ok "Updated: ${YELLOW}${CURRENT_VERSION}${NC} -> ${GREEN}${NEW_VERSION}${NC}"
-
     local HAS_ENABLED=false
     while IFS= read -r inst; do
         systemctl is-enabled "DaggerConnect-${inst}" &>/dev/null && HAS_ENABLED=true && break
     done < <(_list_all_instances)
-
     if $HAS_ENABLED; then
-        read -rp "  Restart all services? [Y/n]: " r || true
-        if [[ ! $r =~ ^[Nn]$ ]]; then
+        read -rp "  Restart all services? [Y/n]: " v || true
+        if [[ ! $v =~ ^[Nn]$ ]]; then
             while IFS= read -r inst; do
-                if systemctl is-enabled "DaggerConnect-${inst}" &>/dev/null 2>/dev/null; then
+                systemctl is-enabled "DaggerConnect-${inst}" &>/dev/null && \
                     systemctl start "DaggerConnect-${inst}" && ok "Restarted: ${inst}" || true
-                fi
             done < <(_list_all_instances)
         fi
     fi
@@ -1933,60 +1238,54 @@ except:
 # ============================================================================
 
 service_management() {
-    local SERVICE_NAME
-    SERVICE_NAME=$(echo "$1" | tr -d '\r\n')
-
+    local SERVICE_NAME; SERVICE_NAME=$(echo "$1" | tr -d '\r\n')
     local NAME="${SERVICE_NAME#DaggerConnect-}"
-    local CONFIG_FILE="$CONFIG_DIR/${NAME}.yaml"
+    local CONFIG_FILE; CONFIG_FILE=$(_instance_config "$NAME")
+    [[ -z "$CONFIG_FILE" ]] && CONFIG_FILE="$CONFIG_DIR/${NAME}.json"
 
     while true; do
         show_banner
-        section "Manage — ${CYAN}DaggerConnect-${NAME}${NC}"
-
-        # نمایش نوع (server/client) از config
+        section "Manage -- ${CYAN}DaggerConnect-${NAME}${NC}"
         if [[ -f "$CONFIG_FILE" ]]; then
-            local INST_MODE
-            INST_MODE=$(grep '^mode:' "$CONFIG_FILE" | head -1 | awk '{print $2}' | tr -d '"')
-            [[ -n "$INST_MODE" ]] && info "Type: ${WHITE}${INST_MODE}${NC}" || true
+            local M
+            if [[ "$CONFIG_FILE" == *.json ]]; then
+                M=$(python3 -c "import json; d=json.load(open('$CONFIG_FILE')); print(d.get('mode',''))" 2>/dev/null || true)
+            else
+                M=$(grep '^mode:' "$CONFIG_FILE" | head -1 | awk '{print $2}' | tr -d '"')
+            fi
+            [[ -n "$M" ]] && info "Type: ${WHITE}${M}${NC}" || true
         fi
-
         if systemctl is-active --quiet "$SERVICE_NAME"; then
-            echo -e "  Status:     ${GREEN}● RUNNING${NC}"
+            echo -e "  Status:     ${GREEN}RUNNING${NC}"
         else
-            echo -e "  Status:     ${RED}● STOPPED${NC}"
+            echo -e "  Status:     ${RED}STOPPED${NC}"
         fi
-
         echo ""; divider
-        echo -e "  ${WHITE}1)${NC} Start        ${WHITE}2)${NC} Stop         ${WHITE}3)${NC} Restart"
-        echo -e "  ${WHITE}4)${NC} Status       ${WHITE}5)${NC} Live Logs"
-        echo -e "  ${WHITE}6)${NC} View Config  ${WHITE}7)${NC} Delete"
+        echo -e "  ${WHITE}1)${NC} Start   ${WHITE}2)${NC} Stop    ${WHITE}3)${NC} Restart"
+        echo -e "  ${WHITE}4)${NC} Status  ${WHITE}5)${NC} Logs    ${WHITE}6)${NC} Config  ${WHITE}7)${NC} Delete"
         echo -e "  ${WHITE}0)${NC} Back"
-        divider
-        echo ""
-
+        divider; echo ""
         read -rp "  Select: " choice || true
-
         case $choice in
             1) systemctl start   "$SERVICE_NAME" 2>/dev/null || true; sleep 1 ;;
             2) systemctl stop    "$SERVICE_NAME" 2>/dev/null || true; sleep 1 ;;
             3) systemctl restart "$SERVICE_NAME" 2>/dev/null || true; sleep 1 ;;
             4) systemctl status  "$SERVICE_NAME" --no-pager || true; press_enter ;;
-            5) journalctl -u "$SERVICE_NAME" -f || true ;;
-            6)
-                if [[ -f "$CONFIG_FILE" ]]; then cat "$CONFIG_FILE"
-                else err "Config not found."; fi
-                press_enter ;;
+            5) journalctl -u "$SERVICE_NAME" -f --output=cat \
+                   | sed -u 's/^[0-9]\{4\}\/[0-9]\{2\}\/[0-9]\{2\} //' \
+                   || true ;;
+            6) if [[ -f "$CONFIG_FILE" ]]; then
+                   if [[ "$CONFIG_FILE" == *.json ]]; then python3 -m json.tool "$CONFIG_FILE"; else cat "$CONFIG_FILE"; fi
+               else err "Config not found."; fi; press_enter ;;
             7)
-                read -rp "  Delete '${NAME}'? [y/N]: " c || true
-                if [[ $c =~ ^[Yy]$ ]]; then
+                read -rp "  Delete '${NAME}'? [y/N]: " v || true
+                if [[ $v =~ ^[Yy]$ ]]; then
                     systemctl stop    "$SERVICE_NAME" 2>/dev/null || true
                     systemctl disable "$SERVICE_NAME" 2>/dev/null || true
-                    rm -f "$CONFIG_FILE"
-                    rm -f "$SYSTEMD_DIR/${SERVICE_NAME}.service"
+                    rm -f "$CONFIG_DIR/${NAME}.yaml" "$CONFIG_DIR/${NAME}.json" \
+                          "$SYSTEMD_DIR/${SERVICE_NAME}.service"
                     systemctl daemon-reload 2>/dev/null || true
-                    ok "Instance '${NAME}' deleted."
-                    press_enter
-                    return
+                    ok "Instance '${NAME}' deleted."; press_enter; return
                 fi ;;
             0) return ;;
         esac
@@ -1994,77 +1293,49 @@ service_management() {
 }
 
 # ============================================================================
-# SETTINGS MENU — همه instances نامحدود
+# SETTINGS MENU
 # ============================================================================
 
 settings_menu() {
     show_banner
-    section "Manage DaggerConnect Instances"
-
-    # جمع‌آوری همه سرویس‌ها
+    section "Manage Instances"
     local INSTANCES=()
-    while IFS= read -r inst; do
-        [[ -n "$inst" ]] && INSTANCES+=("$inst")
-    done < <(_list_all_instances)
+    while IFS= read -r inst; do [[ -n "$inst" ]] && INSTANCES+=("$inst"); done < <(_list_all_instances)
 
     if [[ ${#INSTANCES[@]} -eq 0 ]]; then
-        err "No DaggerConnect instances found."
-        info "Create a server or client first."
-        press_enter
-        main_menu
-        return
+        err "No instances found."; info "Create a server or client first."
+        press_enter; main_menu; return
     fi
-
-    echo ""
-    echo -e "  ${DIM}Total instances: ${#INSTANCES[@]}${NC}"
-    echo ""
-
+    echo ""; echo -e "  ${DIM}Total: ${#INSTANCES[@]}${NC}"; echo ""
     local i=1
     for inst in "${INSTANCES[@]}"; do
-        local STATUS_ICON STATUS_COLOR
-        local CFG="$CONFIG_DIR/${inst}.yaml"
-        local INST_MODE=""
-
-        if systemctl is-active --quiet "DaggerConnect-${inst}" 2>/dev/null; then
-            STATUS_ICON="●"; STATUS_COLOR="$GREEN"
-        else
-            STATUS_ICON="○"; STATUS_COLOR="$RED"
+        local SC="$RED" SI="o" M=""
+        systemctl is-active --quiet "DaggerConnect-${inst}" 2>/dev/null && SC="$GREEN" && SI="*" || true
+        local _CFG; _CFG=$(_instance_config "$inst")
+        if [[ -n "$_CFG" ]]; then
+            if [[ "$_CFG" == *.json ]]; then
+                M=$(python3 -c "import json; d=json.load(open('$_CFG')); print(d.get('mode',''))" 2>/dev/null || true)
+            else
+                M=$(grep '^mode:' "$_CFG" | head -1 | awk '{print $2}' | tr -d '"')
+            fi
         fi
-
-        # خواندن mode از config
-        if [[ -f "$CFG" ]]; then
-            INST_MODE=$(grep '^mode:' "$CFG" | head -1 | awk '{print $2}' | tr -d '"')
-        fi
-
-        printf "  ${WHITE}%2d)${NC} ${STATUS_COLOR}%s${NC} %-28s ${DIM}%s${NC}\n" \
-            "$i" "$STATUS_ICON" "DaggerConnect-${inst}" "${INST_MODE:-unknown}"
+        printf "  ${WHITE}%2d)${NC} ${SC}%s${NC} %-28s ${DIM}%s${NC}\n" "$i" "$SI" "DaggerConnect-${inst}" "${M:-unknown}"
         ((i++))
     done
-
-    echo ""
-    echo -e "  ${WHITE} 0)${NC} Back"
-    divider
-    echo ""
-
-    read -rp "  Select instance: " choice || true
-
+    echo ""; echo -e "  ${WHITE} 0)${NC} Back"; divider; echo ""
+    read -rp "  Select: " choice || true
     if [[ "$choice" =~ ^[0-9]+$ ]]; then
-        if (( choice == 0 )); then
-            main_menu
-            return
-        fi
+        (( choice == 0 )) && main_menu && return
         if (( choice >= 1 && choice <= ${#INSTANCES[@]} )); then
             service_management "DaggerConnect-${INSTANCES[$((choice-1))]}"
-            settings_menu
-            return
+            settings_menu; return
         fi
     fi
-
     settings_menu
 }
 
 # ============================================================================
-# UNINSTALL — همه instances
+# UNINSTALL
 # ============================================================================
 
 uninstall_daggerconnect() {
@@ -2072,161 +1343,112 @@ uninstall_daggerconnect() {
     section "Uninstall DaggerConnect"
     warn "This will remove: binary, ALL configs, ALL services, certs, and optimizations."
     echo ""
-
     local INSTANCES=()
-    while IFS= read -r inst; do
-        [[ -n "$inst" ]] && INSTANCES+=("$inst")
-    done < <(_list_all_instances)
-
+    while IFS= read -r inst; do [[ -n "$inst" ]] && INSTANCES+=("$inst"); done < <(_list_all_instances)
     if [[ ${#INSTANCES[@]} -gt 0 ]]; then
         echo -e "  ${YELLOW}Instances to be removed:${NC}"
-        for inst in "${INSTANCES[@]}"; do
-            echo -e "    ${DIM}• DaggerConnect-${inst}${NC}"
-        done
+        for inst in "${INSTANCES[@]}"; do echo -e "    ${DIM}- DaggerConnect-${inst}${NC}"; done
         echo ""
     fi
-
-    read -rp "  Are you sure? [y/N]: " c || true
-    [[ ! $c =~ ^[Yy]$ ]] && main_menu && return
-
-    # حذف همه سرویس‌ها
+    read -rp "  Are you sure? [y/N]: " v || true
+    [[ ! $v =~ ^[Yy]$ ]] && main_menu && return
     for inst in "${INSTANCES[@]}"; do
         systemctl stop    "DaggerConnect-${inst}" 2>/dev/null || true
         systemctl disable "DaggerConnect-${inst}" 2>/dev/null || true
         rm -f "$SYSTEMD_DIR/DaggerConnect-${inst}.service"
-        ok "Removed service: DaggerConnect-${inst}"
+        ok "Removed: DaggerConnect-${inst}"
     done
-
-    rm -f "$INSTALL_DIR/DaggerConnect"
-    rm -rf "$CONFIG_DIR"
+    rm -f "$INSTALL_DIR/DaggerConnect"; rm -rf "$CONFIG_DIR"
     rm -f /etc/sysctl.d/99-daggerconnect.conf
-    rm -f /etc/network/if-pre-up.d/daggermux-iptables
-
+    rm -f /etc/network/if-pre-up.d/quantummux-iptables
+    rm -f /etc/network/if-pre-up.d/tunmux-iptables-*
     section "Cleaning iptables rules"
     if command -v iptables &>/dev/null; then
-        while IFS= read -r rule; do
-            [[ -n "$rule" ]] && iptables -t raw $rule 2>/dev/null || true
-        done < <(iptables -t raw -S 2>/dev/null | grep -E 'NOTRACK' | sed 's/^-A/-D/' || true)
-
-        while IFS= read -r rule; do
-            [[ -n "$rule" ]] && iptables -t mangle $rule 2>/dev/null || true
-        done < <(iptables -t mangle -S 2>/dev/null | grep -E 'RST.*DROP' | sed 's/^-A/-D/' || true)
-
+        while IFS= read -r r; do [[ -n "$r" ]] && iptables -t raw $r 2>/dev/null || true; done \
+            < <(iptables -t raw -S 2>/dev/null | grep -E 'NOTRACK' | sed 's/^-A/-D/' || true)
+        while IFS= read -r r; do [[ -n "$r" ]] && iptables -t mangle $r 2>/dev/null || true; done \
+            < <(iptables -t mangle -S 2>/dev/null | grep -E 'RST.*DROP' | sed 's/^-A/-D/' || true)
         ok "iptables rules cleaned."
         if command -v iptables-save &>/dev/null && [[ -f /etc/iptables/rules.v4 ]]; then
-            iptables-save > /etc/iptables/rules.v4 2>/dev/null && ok "iptables ruleset saved." || true
+            iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
         fi
     fi
-
     sysctl -p > /dev/null 2>&1 || true
     systemctl daemon-reload 2>/dev/null || true
-
     ok "DaggerConnect uninstalled successfully."
     exit 0
 }
 
 # ============================================================================
-# STATUS DASHBOARD — همه instances
+# STATUS DASHBOARD
 # ============================================================================
 
 show_status_dashboard() {
     show_banner
     section "System Status Dashboard"
-
     if [[ -f "$INSTALL_DIR/DaggerConnect" ]]; then
         local VER; VER=$(get_current_version)
         echo -e "  ${WHITE}Binary:${NC}    ${GREEN}Installed${NC} (${VER})"
     else
         echo -e "  ${WHITE}Binary:${NC}    ${RED}Not installed${NC}"
     fi
-
-    echo ""
-    divider
-
-    # نمایش همه instances
+    echo ""; divider
     local INSTANCES=()
-    while IFS= read -r inst; do
-        [[ -n "$inst" ]] && INSTANCES+=("$inst")
-    done < <(_list_all_instances)
-
+    while IFS= read -r inst; do [[ -n "$inst" ]] && INSTANCES+=("$inst"); done < <(_list_all_instances)
     if [[ ${#INSTANCES[@]} -eq 0 ]]; then
-        echo ""
-        warn "No instances configured yet."
+        echo ""; warn "No instances configured yet."
     else
         for inst in "${INSTANCES[@]}"; do
-            local SVC="DaggerConnect-${inst}"
-            local CFG="$CONFIG_DIR/${inst}.yaml"
-
-            echo ""
-            echo -e "  ${WHITE}── ${CYAN}${inst}${NC} ──"
-
+            local SVC="DaggerConnect-${inst}" CFG; CFG=$(_instance_config "$inst")
+            echo ""; echo -e "  ${WHITE}-- ${CYAN}${inst}${NC} --"
             if systemctl is-active --quiet "$SVC" 2>/dev/null; then
-                echo -e "  Status:     ${GREEN}● RUNNING${NC}"
-                local UPTIME
-                UPTIME=$(systemctl show "$SVC" --property=ActiveEnterTimestamp 2>/dev/null | cut -d= -f2)
-                [[ -n "$UPTIME" ]] && echo -e "  Started:    ${DIM}${UPTIME}${NC}" || true
-                local MEM
-                MEM=$(systemctl show "$SVC" --property=MemoryCurrent 2>/dev/null | cut -d= -f2)
+                echo -e "  Status:     ${GREEN}RUNNING${NC}"
+                local UP; UP=$(systemctl show "$SVC" --property=ActiveEnterTimestamp 2>/dev/null | cut -d= -f2)
+                [[ -n "$UP" ]] && echo -e "  Started:    ${DIM}${UP}${NC}" || true
+                local MEM; MEM=$(systemctl show "$SVC" --property=MemoryCurrent 2>/dev/null | cut -d= -f2)
                 if [[ -n "$MEM" && "$MEM" != "18446744073709551615" && "$MEM" != "[not set]" ]]; then
-                    MEM=$((MEM / 1024 / 1024))
-                    echo -e "  Memory:     ${DIM}${MEM} MB${NC}"
+                    echo -e "  Memory:     ${DIM}$((MEM / 1024 / 1024)) MB${NC}"
                 fi
-            elif systemctl is-enabled "$SVC" &>/dev/null 2>/dev/null; then
-                echo -e "  Status:     ${RED}● STOPPED${NC} ${YELLOW}(enabled but not running)${NC}"
+            elif systemctl is-enabled "$SVC" &>/dev/null; then
+                echo -e "  Status:     ${RED}STOPPED${NC} ${YELLOW}(enabled but not running)${NC}"
             else
-                echo -e "  Status:     ${DIM}○ Not enabled${NC}"
+                echo -e "  Status:     ${DIM}Not enabled${NC}"
             fi
-
             if [[ -f "$CFG" ]]; then
-                local INST_MODE TRANSPORT PORT_COUNT LISTEN_PORT
-                INST_MODE=$(grep '^mode:' "$CFG" | head -1 | awk '{print $2}' | tr -d '"')
-                TRANSPORT=$(grep 'transport:' "$CFG" | head -1 | awk '{print $2}' | tr -d '"')
-                PORT_COUNT=$(grep -c 'type:' "$CFG" 2>/dev/null || echo 0)
-                LISTEN_PORT=$(grep 'addr:' "$CFG" | head -1 | awk '{print $2}' | tr -d '"' | cut -d: -f2)
-
-                [[ -n "$INST_MODE"    ]] && echo -e "  Mode:       ${DIM}${INST_MODE}${NC}"      || true
-                [[ -n "$TRANSPORT"    ]] && echo -e "  Transport:  ${DIM}${TRANSPORT}${NC}"      || true
-                [[ -n "$LISTEN_PORT"  ]] && echo -e "  Port:       ${DIM}${LISTEN_PORT}${NC}"    || true
-                [[ "$PORT_COUNT" -gt 0 ]] && echo -e "  Mappings:   ${DIM}${PORT_COUNT}${NC}"   || true
-
-                if grep -q 'tun_transport:' "$CFG" 2>/dev/null; then
-                    local TT_DEV TT_PROF
-                    TT_DEV=$(grep 'device_name:' "$CFG" | head -1 | awk '{print $2}' | tr -d '"')
-                    TT_PROF=$(grep 'profile:' "$CFG" | head -1 | awk '{print $2}' | tr -d '"')
-                    [[ -n "$TT_DEV" ]] && echo -e "  TUN:        ${DIM}dev=${TT_DEV} profile=${TT_PROF}${NC}" || true
-                    if [[ -n "$TT_DEV" ]] && ip link show "$TT_DEV" &>/dev/null 2>/dev/null; then
-                        echo -e "  TUN State:  ${GREEN}● UP${NC}"
-                    fi
+                local M T PC LP
+                if [[ "$CFG" == *.json ]]; then
+                    M=$(python3  -c "import json,sys; d=json.load(open('$CFG')); print(d.get('mode',''))"  2>/dev/null || true)
+                    T=$(python3  -c "import json,sys; d=json.load(open('$CFG')); l=d.get('listeners',d.get('paths',[])); print(l[0].get('transport','') if l else '')" 2>/dev/null || true)
+                    PC=$(python3 -c "import json,sys; d=json.load(open('$CFG')); l=d.get('listeners',[]); print(sum(len(x.get('maps',[])) for x in l))" 2>/dev/null || echo 0)
+                    LP=$(python3 -c "import json,sys; d=json.load(open('$CFG')); l=d.get('listeners',d.get('paths',[])); a=l[0].get('addr','') if l else ''; print(a.split(':')[-1])" 2>/dev/null || true)
+                else
+                    M=$(grep '^mode:'      "$CFG" | head -1 | awk '{print $2}' | tr -d '"')
+                    T=$(grep 'transport:'  "$CFG" | head -1 | awk '{print $2}' | tr -d '"')
+                    PC=$(grep -c 'type:'   "$CFG" 2>/dev/null || echo 0)
+                    LP=$(grep 'addr:'      "$CFG" | head -1 | awk '{print $2}' | tr -d '"' | cut -d: -f2)
                 fi
+                [[ -n "$M"  ]] && echo -e "  Mode:       ${DIM}${M}${NC}"  || true
+                [[ -n "$T"  ]] && echo -e "  Transport:  ${DIM}${T}${NC}"  || true
+                [[ -n "$LP" ]] && echo -e "  Port:       ${DIM}${LP}${NC}" || true
+                [[ "$PC" -gt 0 ]] && echo -e "  Mappings:   ${DIM}${PC}${NC}" || true
             fi
         done
     fi
-
-    echo ""; divider
-
-    echo ""
+    echo ""; divider; echo ""
     echo -e "  ${WHITE}-- Network --${NC}"
-    local IFACE
-    IFACE=$(ip link show | grep "state UP" | head -1 | awk '{print $2}' | cut -d: -f1)
+    local IFACE; IFACE=$(ip link show | grep "state UP" | head -1 | awk '{print $2}' | cut -d: -f1)
     if [[ -n "$IFACE" ]]; then
         local RX TX
         RX=$(cat /sys/class/net/"$IFACE"/statistics/rx_bytes 2>/dev/null || echo 0)
         TX=$(cat /sys/class/net/"$IFACE"/statistics/tx_bytes 2>/dev/null || echo 0)
-        RX=$((RX / 1024 / 1024)); TX=$((TX / 1024 / 1024))
         echo -e "  Interface:  ${DIM}${IFACE}${NC}"
-        echo -e "  RX / TX:    ${DIM}${RX} MB / ${TX} MB${NC}"
+        echo -e "  RX / TX:    ${DIM}$((RX/1024/1024)) MB / $((TX/1024/1024)) MB${NC}"
     fi
-
-    local CONNS
-    CONNS=$(ss -tn 2>/dev/null | grep -c ESTAB || echo 0)
-    echo -e "  Connections:${DIM} ${CONNS} established${NC}"
-
-    local CCN
-    CCN=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
-    echo -e "  TCP CC:     ${DIM}${CCN}${NC}"
-
-    echo ""; divider
-    press_enter; main_menu
+    local CC; CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+    local CN; CN=$(ss -tn 2>/dev/null | grep -c ESTAB || echo 0)
+    echo -e "  Connections:${DIM} ${CN} established${NC}"
+    echo -e "  TCP CC:     ${DIM}${CC}${NC}"
+    echo ""; divider; press_enter; main_menu
 }
 
 # ============================================================================
@@ -2235,28 +1457,16 @@ show_status_dashboard() {
 
 first_run_check() {
     [[ -f "$FIRST_RUN_FLAG" ]] && return
-
     show_banner
     section "Initial Setup"
-
-    echo -e "  ${WHITE}Download DaggerConnect core from GitHub?${NC}"
-    echo -e "  ${DIM}(Default: Yes)${NC}"
-    echo ""
-
+    echo -e "  ${WHITE}Download DaggerConnect core binary?${NC}"
+    echo -e "  ${DIM}(Default: Yes)${NC}"; echo ""
     read -rp "  Proceed with download? [Y/n]: " ans || true
-
     if [[ $ans =~ ^[Nn]$ ]]; then
-        mkdir -p "$CONFIG_DIR"
-        touch "$FIRST_RUN_FLAG"
-        return
+        mkdir -p "$CONFIG_DIR"; touch "$FIRST_RUN_FLAG"; return
     fi
-
-    install_dependencies
-    download_binary
-
-    mkdir -p "$CONFIG_DIR"
-    touch "$FIRST_RUN_FLAG"
-
+    install_dependencies; download_binary
+    mkdir -p "$CONFIG_DIR"; touch "$FIRST_RUN_FLAG"
     press_enter
 }
 
@@ -2266,40 +1476,27 @@ first_run_check() {
 
 main_menu() {
     show_banner
+    local CURRENT_VER; CURRENT_VER=$(get_current_version)
+    [[ "$CURRENT_VER" != "not-installed" ]] && echo -e "  Version: ${GREEN}${CURRENT_VER}${NC}" && echo "" || true
 
-    local CURRENT_VER
-    CURRENT_VER=$(get_current_version)
-
-    [[ "$CURRENT_VER" != "not-installed" ]] && \
-        echo -e "  Version: ${GREEN}${CURRENT_VER}${NC}" && echo "" || true
-
-    # نمایش تعداد و وضعیت همه instances
-    local RUNNING_COUNT=0 TOTAL_COUNT=0
+    local RUNNING=0 TOTAL=0
     while IFS= read -r inst; do
-        [[ -z "$inst" ]] && continue
-        TOTAL_COUNT=$((TOTAL_COUNT+1))
-        systemctl is-active --quiet "DaggerConnect-${inst}" 2>/dev/null && \
-            RUNNING_COUNT=$((RUNNING_COUNT+1)) || true
+        [[ -z "$inst" ]] && continue; TOTAL=$((TOTAL+1))
+        systemctl is-active --quiet "DaggerConnect-${inst}" 2>/dev/null && RUNNING=$((RUNNING+1)) || true
     done < <(_list_all_instances)
-
-    if [[ "$TOTAL_COUNT" -gt 0 ]]; then
-        echo -e "  Instances: ${GREEN}${RUNNING_COUNT} running${NC} / ${WHITE}${TOTAL_COUNT} total${NC}"
-        echo ""
-    fi
+    [[ "$TOTAL" -gt 0 ]] && echo -e "  Instances: ${GREEN}${RUNNING} running${NC} / ${WHITE}${TOTAL} total${NC}" && echo "" || true
 
     divider
     echo -e "  ${WHITE}1)${NC} Install / Configure Server"
     echo -e "  ${WHITE}2)${NC} Install / Configure Client"
-    echo -e "  ${WHITE}3)${NC} Settings — Manage All Instances"
+    echo -e "  ${WHITE}3)${NC} Settings -- Manage Instances"
     echo -e "  ${WHITE}4)${NC} System Optimizer"
     echo -e "  ${WHITE}5)${NC} Status Dashboard"
     echo -e "  ${WHITE}6)${NC} Update Core"
     echo -e "  ${WHITE}7)${NC} Uninstall DaggerConnect"
     echo -e "  ${WHITE}0)${NC} Exit"
     divider; echo ""
-
     read -rp "  Select option: " choice || true
-
     case $choice in
         1) install_server          ;;
         2) install_client          ;;
