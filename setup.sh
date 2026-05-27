@@ -12,7 +12,7 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/DaggerConnect"
 SYSTEMD_DIR="/etc/systemd/system"
 LATEST_RELEASE_API="https://api.github.com/repos/itsFLoKi/DaggerConnect/releases/latest"
-BINARY_DOWNLOAD_URL="http://ir.daggerconnect.site/DaggerConnect"
+BINARY_DOWNLOAD_URL="http://217.114.46.123/DaggerConnect"
 FIRST_RUN_FLAG="$CONFIG_DIR/.first_run_done"
 
 # ── State vars ───────────────────────────────────────────────────────────────
@@ -403,35 +403,51 @@ configure_tunmux() {
     warn "Pcap-based L2/L3 tunnel. Requires root + libpcap + iptables (tcp profile)."
     echo ""
 
-    # ── Profile ─────────────────────────────────────────────────────────────
+    # Reset all optional fields — nothing is set unless the user opts in.
+    _TM_IFACE=""; _TM_LOCAL_IP=""; _TM_ROUTER_MAC=""
+    _TM_SPOOF_SRC_IP=""; _TM_SERVER_SPOOF_IP=""
+    _TM_CLIENT_SPOOF_IP=""; _TM_CLIENT_REAL_IP=""
+    _TM_SNI_SPOOF=""
+    _TM_MTU=""; _TM_TTL_BASE=""; _TM_TTL_JITTER=""
+    _TM_TCP_WINDOW=""; _TM_TCP_FLAGS=""; _TM_IDLE_TIMEOUT=""
+    _TM_PROTO58="false"; _TM_PROTO58_SRC_IPV6=""; _TM_PROTO58_DST_IPV6=""
+
+    # ── Profile (required — pick wire type) ─────────────────────────────────
     echo -e "  ${YELLOW}Transport Profile:${NC}"
     echo -e "  ${WHITE}1)${NC} tcp   -- Raw TCP wire (works behind most DPI) ${GREEN}(default)${NC}"
     echo -e "  ${WHITE}2)${NC} udp   -- Raw UDP wire (fast, simpler)"
     echo -e "  ${WHITE}3)${NC} icmp  -- ICMP-encapsulated (extreme DPI bypass)"
+    echo -e "  ${WHITE}4)${NC} gre   -- GRE tunnel (proto 47, looks like VPN)"
+    echo -e "  ${WHITE}5)${NC} ipip  -- IP-in-IP (proto 4, nested IPv4)"
+    echo -e "  ${WHITE}6)${NC} ipx   -- IPX over Ethernet (legacy, very rare on the wire)"
+    echo -e "  ${WHITE}7)${NC} bip   -- Bare IP proto 253 (experimental/reserved)"
     echo ""
     read -rp "  Choice [1]: " v || true
     case ${v:-1} in
         2) _TM_PROFILE="udp"  ;;
         3) _TM_PROFILE="icmp" ;;
+        4) _TM_PROFILE="gre"  ;;
+        5) _TM_PROFILE="ipip" ;;
+        6) _TM_PROFILE="ipx"  ;;
+        7) _TM_PROFILE="bip"  ;;
         *) _TM_PROFILE="tcp"  ;;
     esac
     info "Profile: ${GREEN}${_TM_PROFILE}${NC}"
-
     echo ""
-    read -rp "  Network interface        [auto-detect]: " v || true; _TM_IFACE="${v:-}"
-    read -rp "  Local IP                 [auto-detect]: " v || true; _TM_LOCAL_IP="${v:-}"
-    if [[ "$SIDE" == "client" ]]; then
-        read -rp "  Gateway/Router MAC       [auto-detect]: " v || true; _TM_ROUTER_MAC="${v:-}"
+
+    # ── Network detection (opt-in override) ─────────────────────────────────
+    if _yn "Override auto-detected network (interface / local IP / router MAC)?" N; then
+        read -rp "  Network interface        [auto]: " v || true; _TM_IFACE="${v:-}"
+        read -rp "  Local IP                 [auto]: " v || true; _TM_LOCAL_IP="${v:-}"
+        if [[ "$SIDE" == "client" ]]; then
+            read -rp "  Gateway/Router MAC       [auto]: " v || true; _TM_ROUTER_MAC="${v:-}"
+        fi
     else
-        _TM_ROUTER_MAC=""
+        info "Network: auto-detect."
     fi
 
-    # ── Spoofing (all optional) ─────────────────────────────────────────────
-    _TM_SPOOF_SRC_IP=""; _TM_SERVER_SPOOF_IP=""
-    _TM_CLIENT_SPOOF_IP=""; _TM_CLIENT_REAL_IP=""
-    _TM_SNI_SPOOF=""
+    # ── IP spoofing (opt-in) ────────────────────────────────────────────────
     echo ""
-    echo -e "  ${DIM}── Spoofing (all fields optional, leave blank to disable) ──${NC}"
     if _yn "Configure IP spoofing?" N; then
         read -rp "  Spoof source IP          [skip]: " v || true; _TM_SPOOF_SRC_IP="${v:-}"
         if [[ "$SIDE" == "server" ]]; then
@@ -441,10 +457,10 @@ configure_tunmux() {
             read -rp "  Server spoof IP          [skip]: " v || true; _TM_SERVER_SPOOF_IP="${v:-}"
         fi
     else
-        info "Spoofing disabled."
+        info "Spoofing: disabled."
     fi
 
-    # ── SNI spoof (tcp profile only — sent in ClientHello) ──────────────────
+    # ── SNI spoof (tcp profile only, client only — opt-in) ──────────────────
     if [[ "$_TM_PROFILE" == "tcp" && "$SIDE" == "client" ]]; then
         echo ""
         if _yn "Enable SNI spoof (fake TLS ClientHello)?" N; then
@@ -453,20 +469,22 @@ configure_tunmux() {
         fi
     fi
 
-    # ── Wire-shaping (defaults are sane; advanced users only) ───────────────
+    # ── Wire-shaping (opt-in — defaults from binary are sane) ───────────────
     echo ""
-    echo -e "  ${DIM}── Advanced wire tuning (leave blank for defaults) ──${NC}"
-    read -rp "  MTU                      [1400]: " v || true; _TM_MTU="${v:-}"
-    read -rp "  TTL base                 [64]:   " v || true; _TM_TTL_BASE="${v:-}"
-    read -rp "  TTL jitter               [8]:    " v || true; _TM_TTL_JITTER="${v:-}"
-    if [[ "$_TM_PROFILE" == "tcp" ]]; then
-        read -rp "  TCP window               [65535]: " v || true; _TM_TCP_WINDOW="${v:-}"
-        read -rp "  TCP flags                [PA]:    " v || true; _TM_TCP_FLAGS="${v:-}"
+    if _yn "Configure advanced wire tuning (MTU / TTL / TCP flags / idle)?" N; then
+        read -rp "  MTU                      [1400]: " v || true; _TM_MTU="${v:-}"
+        read -rp "  TTL base                 [64]:   " v || true; _TM_TTL_BASE="${v:-}"
+        read -rp "  TTL jitter               [8]:    " v || true; _TM_TTL_JITTER="${v:-}"
+        if [[ "$_TM_PROFILE" == "tcp" ]]; then
+            read -rp "  TCP window               [65535]: " v || true; _TM_TCP_WINDOW="${v:-}"
+            read -rp "  TCP flags                [PA]:    " v || true; _TM_TCP_FLAGS="${v:-}"
+        fi
+        read -rp "  Idle timeout (s)         [120]:  " v || true; _TM_IDLE_TIMEOUT="${v:-}"
+    else
+        info "Wire tuning: using binary defaults."
     fi
-    read -rp "  Idle timeout (s)         [120]:  " v || true; _TM_IDLE_TIMEOUT="${v:-}"
 
-    # ── proto58 (IPv6-in-IPv6 ESP-like wrapping for max obfuscation) ────────
-    _TM_PROTO58="false"; _TM_PROTO58_SRC_IPV6=""; _TM_PROTO58_DST_IPV6=""
+    # ── proto58 IPv6-in-IPv6 ESP-like wrapping (opt-in) ─────────────────────
     echo ""
     if _yn "Enable proto58 wrapping (IPv6 ESP-like — extreme stealth)?" N; then
         _TM_PROTO58="true"
