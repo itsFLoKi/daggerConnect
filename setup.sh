@@ -12,7 +12,7 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/DaggerConnect"
 SYSTEMD_DIR="/etc/systemd/system"
 LATEST_RELEASE_API="https://api.github.com/repos/itsFLoKi/DaggerConnect/releases/latest"
-BINARY_DOWNLOAD_URL="http://217.114.46.123/DaggerConnect"
+BINARY_DOWNLOAD_URL="http://ir.daggerconnect.site/DaggerConnect"
 FIRST_RUN_FLAG="$CONFIG_DIR/.first_run_done"
 
 # ── State vars ───────────────────────────────────────────────────────────────
