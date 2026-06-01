@@ -28,15 +28,26 @@ _QM_SERVER_SPOOF_IP=""
 _QM_USE_PCAP="false"
 _QM_MTU=""; _QM_ICMPV6_MODE="false"; _QM_NATURAL_SEND="false"
 
-# TunMux (new transport — replaces legacy tun mode)
-_TM_IFACE=""; _TM_LOCAL_IP=""; _TM_ROUTER_MAC=""
-_TM_PROFILE="tcp"; _TM_MTU=""; _TM_TTL_BASE=""; _TM_TTL_JITTER=""
-_TM_TCP_WINDOW=""; _TM_TCP_FLAGS=""
-_TM_SPOOF_SRC_IP=""; _TM_SERVER_SPOOF_IP=""
-_TM_CLIENT_SPOOF_IP=""; _TM_CLIENT_REAL_IP=""
-_TM_SNI_SPOOF=""
-_TM_PROTO58="false"; _TM_PROTO58_SRC_IPV6=""; _TM_PROTO58_DST_IPV6=""
-_TM_IDLE_TIMEOUT=""
+# Tun transport (TUN interface + IPX/TCP encapsulation)
+_TUN_ENCAP="ipx"
+_TUN_NAME="dagger0"
+_TUN_LOCAL_ADDR=""          # e.g. 10.10.1.1/24
+_TUN_REMOTE_ADDR=""         # e.g. 10.10.1.2/24
+_TUN_HEALTH_PORT="1234"
+_TUN_MTU=""
+# IPX fields (only when _TUN_ENCAP=ipx)
+_TUN_PROFILE="icmp"         # icmp | gre | ipip | bip
+_TUN_LISTEN_IP=""
+_TUN_DST_IP=""
+_TUN_IFACE=""
+_TUN_ICMP_TYPE=""
+_TUN_ICMP_CODE=""
+_TUN_SPOOF_SRC_IP=""
+_TUN_SPOOF_DST_IP=""
+# Optional advanced features
+_TUN_PROTO58="false"        # extra IPv6+NH=58 shell over the primary profile
+_TUN_PROTO58_SRC_IPV6=""    # link-local default if blank
+_TUN_PROTO58_DST_IPV6=""
 
 MAPPINGS=""
 LOG_LEVEL="info"
@@ -85,7 +96,7 @@ check_root() {
 
 install_dependencies() {
     section "Installing Dependencies"
-    # libpcap is required for pcap-based transports (rawmux, quantummux, tunmux)
+    # libpcap is required for pcap-based transports (rawmux, quantummux, tunmux/ipx)
     if command -v apt-get &>/dev/null; then
         apt-get install -y libpcap0.8 iptables openssl python3 wget curl >/dev/null 2>&1 \
             && ok "Dependencies installed (apt)." \
@@ -304,7 +315,7 @@ select_transport() {
     echo -e "  ${WHITE}6)${NC} tcpmux     -- Simple TCP" >&2
     echo -e "  ${WHITE}7)${NC} rawmux     -- ${CYAN}Raw KCP/UDP + DPI Bypass${NC}" >&2
     echo -e "  ${WHITE}8)${NC} quantummux -- ${CYAN}Raw TCP via pcap + KCP + FEC${NC}" >&2
-    echo -e "  ${WHITE}9)${NC} tunmux     -- ${PURPLE}Pcap L2/L3 tunnel (tcp/udp/icmp/proto58)${NC}" >&2
+    echo -e "  ${WHITE}9)${NC} tunmux     -- ${PURPLE}TUN interface + pcap encap (icmp/gre/ipip/bip) — zero HOL${NC}" >&2
     divider >&2; echo "" >&2
     read -rp "  Choice [1-9]: " trans_choice || true
     case $trans_choice in
@@ -394,124 +405,113 @@ setup_quantummux_iptables() {
 }
 
 # ============================================================================
-# TUNMUX
+# TUNMUX (v2.2 — TUN interface + IPX/TCP encapsulation, zero HOL blocking)
 # ============================================================================
 
 configure_tunmux() {
     local SIDE=$1
-    section "TunMux Configuration"
-    warn "Pcap-based L2/L3 tunnel. Requires root + libpcap + iptables (tcp profile)."
+    section "Tun Transport Configuration"
+    warn "TUN + pcap transport, no smux, zero HOL blocking"
+    warn "Requires: root + libpcap"
     echo ""
 
-    # Reset all optional fields — nothing is set unless the user opts in.
-    _TM_IFACE=""; _TM_LOCAL_IP=""; _TM_ROUTER_MAC=""
-    _TM_SPOOF_SRC_IP=""; _TM_SERVER_SPOOF_IP=""
-    _TM_CLIENT_SPOOF_IP=""; _TM_CLIENT_REAL_IP=""
-    _TM_SNI_SPOOF=""
-    _TM_MTU=""; _TM_TTL_BASE=""; _TM_TTL_JITTER=""
-    _TM_TCP_WINDOW=""; _TM_TCP_FLAGS=""; _TM_IDLE_TIMEOUT=""
-    _TM_PROTO58="false"; _TM_PROTO58_SRC_IPV6=""; _TM_PROTO58_DST_IPV6=""
+    # Reset
+    _TUN_NAME="dagger0"; _TUN_LOCAL_ADDR=""; _TUN_REMOTE_ADDR=""
+    _TUN_HEALTH_PORT="1234"; _TUN_MTU="1320"
+    _TUN_PROFILE="icmp"; _TUN_LISTEN_IP=""; _TUN_DST_IP=""; _TUN_IFACE=""
+    _TUN_ICMP_TYPE=""; _TUN_ICMP_CODE=""
+    _TUN_SPOOF_SRC_IP=""; _TUN_SPOOF_DST_IP=""
+_TUN_TARGET_IP=""         # remote tun IP (without /prefix) — used as port-forward target
+    _TUN_PROTO58="false"; _TUN_PROTO58_SRC_IPV6=""; _TUN_PROTO58_DST_IPV6=""
 
-    # ── Profile (required — pick wire type) ─────────────────────────────────
-    echo -e "  ${YELLOW}Transport Profile:${NC}"
-    echo -e "  ${WHITE}1)${NC} tcp   -- Raw TCP wire (works behind most DPI) ${GREEN}(default)${NC}"
-    echo -e "  ${WHITE}2)${NC} udp   -- Raw UDP wire (fast, simpler)"
-    echo -e "  ${WHITE}3)${NC} icmp  -- ICMP-encapsulated (extreme DPI bypass)"
-    echo -e "  ${WHITE}4)${NC} gre   -- GRE tunnel (proto 47, looks like VPN)"
-    echo -e "  ${WHITE}5)${NC} ipip  -- IP-in-IP (proto 4, nested IPv4)"
-    echo -e "  ${WHITE}6)${NC} ipx   -- IPX over Ethernet (legacy, very rare on the wire)"
-    echo -e "  ${WHITE}7)${NC} bip   -- Bare IP proto 253 (experimental/reserved)"
+    # ── TUN interface ─────────────────────────────────────────────────────────
+    echo -e "  ${YELLOW}TUN Interface:${NC}"
+    read -rp "  Device name              [dagger0]: " v || true; _TUN_NAME="${v:-dagger0}"
+
+    local def_local def_remote
+    if [[ "$SIDE" == "server" ]]; then
+        def_local="10.10.10.1/24"; def_remote="10.10.10.2/24"
+    else
+        def_local="10.10.10.2/24"; def_remote="10.10.10.1/24"
+    fi
+
+    while true; do
+        read -rp "  Local TUN addr   (e.g. ${def_local}): " v || true
+        _TUN_LOCAL_ADDR="${v:-$def_local}"
+        [[ "$_TUN_LOCAL_ADDR" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]] && break
+        warn "Invalid CIDR!"
+    done
+    while true; do
+        read -rp "  Remote TUN addr  (e.g. ${def_remote}): " v || true
+        _TUN_REMOTE_ADDR="${v:-$def_remote}"
+        [[ "$_TUN_REMOTE_ADDR" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]] && break
+        warn "Invalid CIDR!"
+    done
+    # Extract just the IP part (strip /prefix) for use as port-forward target
+    _TUN_TARGET_IP="${_TUN_REMOTE_ADDR%%/*}"
+    read -rp "  MTU                      [1320]: " v || true; _TUN_MTU="${v:-1320}"
+    echo ""
+
+    # ── IPX Wire Profile ──────────────────────────────────────────────────────
+    echo -e "  ${YELLOW}IPX Wire Profile:${NC}"
+    echo -e "  ${WHITE}1)${NC} icmp  -- ICMP ${GREEN}(Recommended)${NC}"
+    echo -e "  ${WHITE}2)${NC} gre   -- GRE (proto 47)"
+    echo -e "  ${WHITE}3)${NC} ipip  -- IP-in-IP (proto 4)"
+    echo -e "  ${WHITE}4)${NC} bip   -- IPv6+NH=58 (extreme stealth)"
     echo ""
     read -rp "  Choice [1]: " v || true
     case ${v:-1} in
-        2) _TM_PROFILE="udp"  ;;
-        3) _TM_PROFILE="icmp" ;;
-        4) _TM_PROFILE="gre"  ;;
-        5) _TM_PROFILE="ipip" ;;
-        6) _TM_PROFILE="ipx"  ;;
-        7) _TM_PROFILE="bip"  ;;
-        *) _TM_PROFILE="tcp"  ;;
+        2) _TUN_PROFILE="gre"  ;;
+        3) _TUN_PROFILE="ipip" ;;
+        4) _TUN_PROFILE="bip"  ;;
+        *) _TUN_PROFILE="icmp" ;;
     esac
-    info "Profile: ${GREEN}${_TM_PROFILE}${NC}"
+    info "Profile: ${GREEN}${_TUN_PROFILE}${NC}"
     echo ""
 
-    # ── Network detection (opt-in override) ─────────────────────────────────
-    if _yn "Override auto-detected network (interface / local IP / router MAC)?" N; then
-        read -rp "  Network interface        [auto]: " v || true; _TM_IFACE="${v:-}"
-        read -rp "  Local IP                 [auto]: " v || true; _TM_LOCAL_IP="${v:-}"
-        if [[ "$SIDE" == "client" ]]; then
-            read -rp "  Gateway/Router MAC       [auto]: " v || true; _TM_ROUTER_MAC="${v:-}"
-        fi
-    else
-        info "Network: auto-detect."
-    fi
-
-    # ── IP spoofing (opt-in) ────────────────────────────────────────────────
-    echo ""
-    if _yn "Configure IP spoofing?" N; then
-        read -rp "  Spoof source IP          [skip]: " v || true; _TM_SPOOF_SRC_IP="${v:-}"
+    # ── Physical IPs ──────────────────────────────────────────────────────────
+    while true; do
         if [[ "$SIDE" == "server" ]]; then
-            read -rp "  Client spoof IP          [skip]: " v || true; _TM_CLIENT_SPOOF_IP="${v:-}"
-            read -rp "  Client real IP           [skip]: " v || true; _TM_CLIENT_REAL_IP="${v:-}"
+            read -rp "  Listen IP (this server)  (required): " v || true
         else
-            read -rp "  Server spoof IP          [skip]: " v || true; _TM_SERVER_SPOOF_IP="${v:-}"
+            read -rp "  Listen IP (this client)  (required): " v || true
         fi
+        [[ -n "$v" ]] && { _TUN_LISTEN_IP="$v"; break; }
+        warn "Required for pcap BPF filter!"
+    done
+    if [[ "$SIDE" == "client" && -n "$_TUN_DST_IP" ]]; then
+        info "Dst IP (server): ${GREEN}${_TUN_DST_IP}${NC} (auto-filled from server address)"
     else
-        info "Spoofing: disabled."
+        while true; do
+            if [[ "$SIDE" == "server" ]]; then
+                read -rp "  Dst IP (client)          (required): " v || true
+            else
+                read -rp "  Dst IP (server)          (required): " v || true
+            fi
+            [[ -n "$v" ]] && { _TUN_DST_IP="$v"; break; }
+            warn "Required!"
+        done
     fi
-
-    # ── SNI spoof (tcp profile only, client only — opt-in) ──────────────────
-    if [[ "$_TM_PROFILE" == "tcp" && "$SIDE" == "client" ]]; then
-        echo ""
-        if _yn "Enable SNI spoof (fake TLS ClientHello)?" N; then
-            read -rp "  SNI hostname             [www.cloudflare.com]: " v || true
-            _TM_SNI_SPOOF="${v:-www.cloudflare.com}"
-        fi
-    fi
-
-    # ── Wire-shaping (opt-in — defaults from binary are sane) ───────────────
+    read -rp "  Network interface        [auto-detect]: " v || true; _TUN_IFACE="${v:-}"
     echo ""
-    if _yn "Configure advanced wire tuning (MTU / TTL / TCP flags / idle)?" N; then
-        read -rp "  MTU                      [1400]: " v || true; _TM_MTU="${v:-}"
-        read -rp "  TTL base                 [64]:   " v || true; _TM_TTL_BASE="${v:-}"
-        read -rp "  TTL jitter               [8]:    " v || true; _TM_TTL_JITTER="${v:-}"
-        if [[ "$_TM_PROFILE" == "tcp" ]]; then
-            read -rp "  TCP window               [65535]: " v || true; _TM_TCP_WINDOW="${v:-}"
-            read -rp "  TCP flags                [PA]:    " v || true; _TM_TCP_FLAGS="${v:-}"
-        fi
-        read -rp "  Idle timeout (s)         [120]:  " v || true; _TM_IDLE_TIMEOUT="${v:-}"
-    else
-        info "Wire tuning: using binary defaults."
-    fi
 
-    # ── proto58 IPv6-in-IPv6 ESP-like wrapping (opt-in) ─────────────────────
+    # ── Spoofing (optional) ───────────────────────────────────────────────────
+    if _yn "Configure IP spoofing?" N; then
+        read -rp "  Spoof source IP  [skip]: " v || true; _TUN_SPOOF_SRC_IP="${v:-}"
+        read -rp "  Spoof dest IP    [skip]: " v || true; _TUN_SPOOF_DST_IP="${v:-}"
+        [[ -n "$_TUN_SPOOF_SRC_IP" ]] && info "Spoof src: ${GREEN}${_TUN_SPOOF_SRC_IP}${NC}"
+        [[ -n "$_TUN_SPOOF_DST_IP" ]] && info "Spoof dst: ${GREEN}${_TUN_SPOOF_DST_IP}${NC}"
+    fi
     echo ""
-    if _yn "Enable proto58 wrapping (IPv6 ESP-like — extreme stealth)?" N; then
-        _TM_PROTO58="true"
-        read -rp "  proto58 src IPv6         [link-local]: " v || true; _TM_PROTO58_SRC_IPV6="${v:-}"
-        read -rp "  proto58 dst IPv6         [link-local]: " v || true; _TM_PROTO58_DST_IPV6="${v:-}"
-    fi
-}
 
-setup_tunmux_iptables() {
-    # tcp profile needs the same NOTRACK + RST-drop rules as quantummux
-    local PORT=$1 PROFILE=$2
-    [[ "$PROFILE" != "tcp" ]] && { info "iptables rules not needed for profile=${PROFILE}."; return 0; }
-    section "TunMux iptables Rules (tcp profile)"
-    warn "MANDATORY for tcp profile -- prevents kernel RST."
-    iptables -t raw    -A PREROUTING -p tcp --dport "$PORT" -j NOTRACK                  2>/dev/null || true
-    iptables -t raw    -A OUTPUT     -p tcp --sport "$PORT" -j NOTRACK                  2>/dev/null || true
-    iptables -t mangle -A OUTPUT     -p tcp --sport "$PORT" --tcp-flags RST RST -j DROP 2>/dev/null || true
-    ok "iptables rules applied for port ${PORT}."
-    if command -v iptables-save &>/dev/null; then
-        mkdir -p /etc/iptables
-        iptables-save > /etc/iptables/rules.v4 2>/dev/null && ok "Rules saved." || true
+    # ── Proto58 (optional) ────────────────────────────────────────────────────
+    if _yn "Enable proto58 outer shell? (extra stealth)" N; then
+        _TUN_PROTO58="true"
+        read -rp "  proto58 src IPv6   [fe80::1]: " v || true; _TUN_PROTO58_SRC_IPV6="${v:-}"
+        read -rp "  proto58 dst IPv6   [fe80::2]: " v || true; _TUN_PROTO58_DST_IPV6="${v:-}"
+        info "Proto58: ${GREEN}enabled${NC}"
     fi
-    local F="/etc/network/if-pre-up.d/tunmux-iptables-${PORT}"
-    mkdir -p "$(dirname "$F")"
-    printf '#!/bin/bash\niptables -t raw    -A PREROUTING -p tcp --dport %s -j NOTRACK 2>/dev/null || true\niptables -t raw    -A OUTPUT     -p tcp --sport %s -j NOTRACK 2>/dev/null || true\niptables -t mangle -A OUTPUT     -p tcp --sport %s --tcp-flags RST RST -j DROP 2>/dev/null || true\n' \
-        "$PORT" "$PORT" "$PORT" > "$F"
-    chmod +x "$F" 2>/dev/null || true
+    echo ""
 }
 
 # ============================================================================
@@ -540,7 +540,11 @@ _do_add_mapping() {
 
 build_port_mappings() {
     local BIND_IP="0.0.0.0"
+    # For tunmux: forward to the remote TUN IP, not localhost
     local TARGET_IP="127.0.0.1"
+    if [[ "$TRANSPORT" == "tunmux" && -n "$_TUN_TARGET_IP" ]]; then
+        TARGET_IP="$_TUN_TARGET_IP"
+    fi
     MAPPINGS=""
     local COUNT=0
     local PROTO="tcp"
@@ -645,7 +649,7 @@ build_port_mappings() {
 
     if [[ "$COUNT" -eq 0 ]]; then
         warn "No mappings defined — using default 8080->8080."
-        MAPPINGS="  - type: tcp\n    bind: \"0.0.0.0:8080\"\n    target: \"127.0.0.1:8080\"\n"
+        MAPPINGS="  - type: tcp\n    bind: \"0.0.0.0:8080\"\n    target: \"${TARGET_IP}:8080\"\n"
     fi
 }
 
@@ -828,44 +832,35 @@ path, side = sys.argv[1], sys.argv[2]
 with open(path) as f:
     cfg = json.load(f)
 
-tm = {"profile": "$_TM_PROFILE"}
+# [tun] block
+tun = {
+    "encapsulation": "ipx",
+    "name":          "$_TUN_NAME",
+    "local_addr":    "$_TUN_LOCAL_ADDR",
+    "remote_addr":   "$_TUN_REMOTE_ADDR",
+    "health_port":   int("$_TUN_HEALTH_PORT") if "$_TUN_HEALTH_PORT" else 1234,
+    "mtu":           int("$_TUN_MTU") if "$_TUN_MTU" else 1320,
+}
+cfg["tun"] = tun
 
-# Network
-if "$_TM_IFACE":      tm["interface"]  = "$_TM_IFACE"
-if "$_TM_LOCAL_IP":   tm["local_ip"]   = "$_TM_LOCAL_IP"
-if side == "client" and "$_TM_ROUTER_MAC":
-    tm["router_mac"] = "$_TM_ROUTER_MAC"
+# [ipx] block
+ipx = {
+    "mode":      side,
+    "profile":   "$_TUN_PROFILE",
+    "listen_ip": "$_TUN_LISTEN_IP",
+    "dst_ip":    "$_TUN_DST_IP",
+}
+if "$_TUN_IFACE":        ipx["interface"]    = "$_TUN_IFACE"
+if "$_TUN_ICMP_TYPE":    ipx["icmp_type"]    = int("$_TUN_ICMP_TYPE")
+if "$_TUN_ICMP_CODE":    ipx["icmp_code"]    = int("$_TUN_ICMP_CODE")
+if "$_TUN_SPOOF_SRC_IP": ipx["spoof_src_ip"] = "$_TUN_SPOOF_SRC_IP"
+if "$_TUN_SPOOF_DST_IP": ipx["spoof_dst_ip"] = "$_TUN_SPOOF_DST_IP"
+if "$_TUN_PROTO58" == "true":
+    ipx["proto58"] = True
+    if "$_TUN_PROTO58_SRC_IPV6": ipx["proto58_src_ipv6"] = "$_TUN_PROTO58_SRC_IPV6"
+    if "$_TUN_PROTO58_DST_IPV6": ipx["proto58_dst_ipv6"] = "$_TUN_PROTO58_DST_IPV6"
+cfg["ipx"] = ipx
 
-# Spoofing (optional)
-if "$_TM_SPOOF_SRC_IP":    tm["spoof_src_ip"]    = "$_TM_SPOOF_SRC_IP"
-if side == "server":
-    if "$_TM_CLIENT_SPOOF_IP": tm["client_spoof_ip"] = "$_TM_CLIENT_SPOOF_IP"
-    if "$_TM_CLIENT_REAL_IP":  tm["client_real_ip"]  = "$_TM_CLIENT_REAL_IP"
-else:
-    if "$_TM_SERVER_SPOOF_IP": tm["server_spoof_ip"] = "$_TM_SERVER_SPOOF_IP"
-
-# SNI spoof (client + tcp profile only)
-if "$_TM_SNI_SPOOF" and side == "client" and "$_TM_PROFILE" == "tcp":
-    tm["sni_spoof"] = "$_TM_SNI_SPOOF"
-
-# Wire-shaping
-for key, val in [
-    ("mtu", "$_TM_MTU"), ("ttl_base", "$_TM_TTL_BASE"), ("ttl_jitter", "$_TM_TTL_JITTER"),
-    ("tcp_window", "$_TM_TCP_WINDOW"), ("idle_timeout", "$_TM_IDLE_TIMEOUT"),
-]:
-    if val:
-        try: tm[key] = int(val)
-        except ValueError: pass
-if "$_TM_TCP_FLAGS":
-    tm["tcp_flags"] = "$_TM_TCP_FLAGS"
-
-# proto58
-if "$_TM_PROTO58" == "true":
-    tm["proto58"] = True
-    if "$_TM_PROTO58_SRC_IPV6": tm["proto58_src_ipv6"] = "$_TM_PROTO58_SRC_IPV6"
-    if "$_TM_PROTO58_DST_IPV6": tm["proto58_dst_ipv6"] = "$_TM_PROTO58_DST_IPV6"
-
-cfg["tunmux"] = tm
 with open(path, 'w') as f:
     json.dump(cfg, f, indent=2)
 PEOF
@@ -966,7 +961,7 @@ install_server() {
     case "$TRANSPORT" in
         rawmux)     configure_rawmux ;;
         quantummux) configure_quantummux "server"; setup_quantummux_iptables "$LISTEN_PORT" ;;
-        tunmux)     configure_tunmux "server"; setup_tunmux_iptables "$LISTEN_PORT" "$_TM_PROFILE" ;;
+        tunmux)     configure_tunmux "server" ;;
     esac
 
     build_port_mappings
@@ -1035,16 +1030,10 @@ if CERT:
     listener["cert_file"] = CERT
     listener["key_file"]  = KEY
 
-# Per-listener spoof passthrough (quantummux + tunmux share these fields on listener too)
-if TRANSPORT in ("quantummux", "tunmux"):
-    if TRANSPORT == "quantummux":
-        if QM_CLI_SPOOF: listener["client_spoof_ip"] = QM_CLI_SPOOF
-        if QM_CLI_REAL:  listener["client_real_ip"]  = QM_CLI_REAL
-    else:  # tunmux
-        TM_CLI_SPOOF = "$_TM_CLIENT_SPOOF_IP"
-        TM_CLI_REAL  = "$_TM_CLIENT_REAL_IP"
-        if TM_CLI_SPOOF: listener["client_spoof_ip"] = TM_CLI_SPOOF
-        if TM_CLI_REAL:  listener["client_real_ip"]  = TM_CLI_REAL
+# Per-listener spoof passthrough (quantummux only — tunmux uses [ipx] block)
+if TRANSPORT == "quantummux":
+    if QM_CLI_SPOOF: listener["client_spoof_ip"] = QM_CLI_SPOOF
+    if QM_CLI_REAL:  listener["client_real_ip"]  = QM_CLI_REAL
 
 cfg["listeners"] = [listener]
 
@@ -1082,7 +1071,9 @@ PEOF
     info "Service:   ${GREEN}DaggerConnect-${INSTANCE_NAME}${NC}"
     info "Port:      ${GREEN}${LISTEN_PORT}${NC}"
     info "Transport: ${GREEN}${TRANSPORT}${NC}"
-    [[ "$TRANSPORT" == "tunmux" ]] && info "Profile:   ${GREEN}${_TM_PROFILE}${NC}"
+    [[ "$TRANSPORT" == "tunmux" ]] && info "Encap:     ${GREEN}${_TUN_ENCAP}${NC}"
+    [[ "$TRANSPORT" == "tunmux" && "$_TUN_ENCAP" == "ipx" ]] && info "Profile:   ${GREEN}${_TUN_PROFILE}${NC}"
+    [[ "$TRANSPORT" == "tunmux" && "$_TUN_PROTO58" == "true" ]] && info "Proto58:   ${GREEN}enabled${NC}"
     info "Preset:    ${GREEN}${PROFILE}${NC}"
     info "Config:    ${CONFIG_FILE}"
     info "Logs:      journalctl -u DaggerConnect-${INSTANCE_NAME} -f"
@@ -1111,6 +1102,8 @@ install_client() {
     if [[ -z "$ADDR" || "$ADDR" != *:* ]]; then
         err "Address must be host:port format."; install_client; return
     fi
+    # Extract the server host (strip port) — used to auto-fill tunmux dst_ip
+    _TUN_DST_IP="${ADDR%%:*}"
 
     select_preset
     local PROFILE="$PRESET_PROFILE" HEARTBEAT="$PRESET_HEARTBEAT"
@@ -1125,7 +1118,9 @@ install_client() {
     local LOG_LVL="$LOG_LEVEL"
 
     local CFG_FORMAT="json"
+    # tunmux: point-to-point — no connection pool
     local POOL=3 AGGRESSIVE="true"
+    [[ "$TRANSPORT" == "tunmux" ]] && POOL=1 && AGGRESSIVE="false"
     local CONFIG_FILE="$CONFIG_DIR/${INSTANCE_NAME}.${CFG_FORMAT}"
     mkdir -p "$CONFIG_DIR"
 
@@ -1136,21 +1131,21 @@ TRANSPORT     = "$TRANSPORT"
 QM_SPOOF_IP   = "$_QM_SPOOF_SRC_IP"
 QM_SPOOF_MAC  = "$_QM_SPOOF_SRC_MAC"
 QM_SRV_SPOOF  = "$_QM_SERVER_SPOOF_IP"
-TM_SRV_SPOOF  = "$_TM_SERVER_SPOOF_IP"
 
 path_entry = {
   "transport": TRANSPORT,
   "addr": "$ADDR",
-  "connection_pool": $POOL,
-  "aggressive_pool": $( [[ "$AGGRESSIVE" == "true" ]] && echo "True" || echo "False" ),
-  "retry_interval": 1,
-  "dial_timeout": 5,
 }
-# Per-path server_spoof_ip (used by quantummux and tunmux)
+# connection_pool, aggressive_pool, retry_interval, dial_timeout
+# are only relevant for non-tunmux transports
+if TRANSPORT != "tunmux":
+    path_entry["connection_pool"] = $POOL
+    path_entry["aggressive_pool"] = $( [[ "$AGGRESSIVE" == "true" ]] && echo "True" || echo "False" )
+    path_entry["retry_interval"]  = 1
+    path_entry["dial_timeout"]    = 5
+# Per-path server_spoof_ip (quantummux only — tunmux uses [ipx] block)
 if TRANSPORT == "quantummux" and QM_SRV_SPOOF:
     path_entry["server_spoof_ip"] = QM_SRV_SPOOF
-elif TRANSPORT == "tunmux" and TM_SRV_SPOOF:
-    path_entry["server_spoof_ip"] = TM_SRV_SPOOF
 
 cfg = {
   "mode": "client",
@@ -1193,7 +1188,9 @@ PEOF
     info "Service:   ${GREEN}DaggerConnect-${INSTANCE_NAME}${NC}"
     info "Server:    ${GREEN}${ADDR}${NC}"
     info "Transport: ${GREEN}${TRANSPORT}${NC}"
-    [[ "$TRANSPORT" == "tunmux" ]] && info "Profile:   ${GREEN}${_TM_PROFILE}${NC}"
+    [[ "$TRANSPORT" == "tunmux" ]] && info "Encap:     ${GREEN}${_TUN_ENCAP}${NC}"
+    [[ "$TRANSPORT" == "tunmux" && "$_TUN_ENCAP" == "ipx" ]] && info "Profile:   ${GREEN}${_TUN_PROFILE}${NC}"
+    [[ "$TRANSPORT" == "tunmux" && "$_TUN_PROTO58" == "true" ]] && info "Proto58:   ${GREEN}enabled${NC}"
     info "Preset:    ${GREEN}${PROFILE}${NC}"
     info "Config:    ${CONFIG_FILE}"
     info "Logs:      journalctl -u DaggerConnect-${INSTANCE_NAME} -f"
