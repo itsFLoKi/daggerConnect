@@ -371,14 +371,38 @@ build_ports_json() {
 }
 
 build_ports_yaml() {
+    # FIX: was emitting "  - value" (2-space indent). Every caller places
+    # "ports:" itself at 4-space indent (nested under a listener list item),
+    # so children need 6 spaces to actually nest under it -- at 2 spaces
+    # they instead became a second, malformed entry of the outer listeners
+    # list itself (a bare string sibling next to the listener dict), and
+    # "ports" parsed as an empty/null field. This affected every transport,
+    # since they all share this one function.
     for p in "$@"; do
-        printf '  - "%s"
+        printf '      - "%s"
 ' "$p"
     done
 }
 
 SOCKS5_ENABLED="false"
 SOCKS5_BIND=""
+
+# ── client-side connection pool (redundant parallel connections per path) ──
+# Not offered for tun: a TUN link is a single point-to-point interface, so
+# multiple simultaneous sessions would just fight over the same interface
+# name and internal IP pair. Every other transport benefits from this: if
+# one connection drops (common on unstable links), the others keep traffic
+# flowing while it reconnects, instead of the whole tunnel going down.
+CLIENT_CONN_POOL="2"
+
+ask_connection_pool() {
+    echo ""
+    echo -e "  ${BOLD}Connection Pool:${NC}"
+    echo -e "        Multiple parallel connections per path -- if one drops, the"
+    echo -e "        others keep traffic flowing while it reconnects."
+    echo ""
+    ask CLIENT_CONN_POOL "Connections per path" "2"
+}
 
 ask_socks5() {
     echo ""
@@ -418,7 +442,7 @@ apply_profile() {
             ADV_CHANNEL_BACKLOG="4096"   ADV_STREAM_CHAN_BUF="512"
             ADV_TCP_KEEPALIVE="1"        ADV_CONN_TIMEOUT="30"
             ADV_SESSION_TIMEOUT="60"     ADV_CLEANUP_INTERVAL="3"
-            ADV_KEEPALIVE_SEC="5"        ADV_DEAD_TIMEOUT_SEC="25"
+            ADV_KEEPALIVE_SEC="5"        ADV_DEAD_TIMEOUT_SEC="40"
             ;;
         aggressive)
             ADV_TCP_READ_BUF="16777216"  ADV_TCP_WRITE_BUF="16777216"
@@ -426,7 +450,7 @@ apply_profile() {
             ADV_CHANNEL_BACKLOG="8192"   ADV_STREAM_CHAN_BUF="2048"
             ADV_TCP_KEEPALIVE="1"        ADV_CONN_TIMEOUT="60"
             ADV_SESSION_TIMEOUT="120"    ADV_CLEANUP_INTERVAL="5"
-            ADV_KEEPALIVE_SEC="6"        ADV_DEAD_TIMEOUT_SEC="30"
+            ADV_KEEPALIVE_SEC="6"        ADV_DEAD_TIMEOUT_SEC="48"
             ;;
         low_latency)
             ADV_TCP_READ_BUF="2097152"   ADV_TCP_WRITE_BUF="2097152"
@@ -434,7 +458,7 @@ apply_profile() {
             ADV_CHANNEL_BACKLOG="2048"   ADV_STREAM_CHAN_BUF="256"
             ADV_TCP_KEEPALIVE="1"        ADV_CONN_TIMEOUT="15"
             ADV_SESSION_TIMEOUT="30"     ADV_CLEANUP_INTERVAL="2"
-            ADV_KEEPALIVE_SEC="4"        ADV_DEAD_TIMEOUT_SEC="16"
+            ADV_KEEPALIVE_SEC="4"        ADV_DEAD_TIMEOUT_SEC="24"
             ;;
         low_hardware)
             ADV_TCP_READ_BUF="524288"    ADV_TCP_WRITE_BUF="524288"
@@ -442,7 +466,7 @@ apply_profile() {
             ADV_CHANNEL_BACKLOG="512"    ADV_STREAM_CHAN_BUF="128"
             ADV_TCP_KEEPALIVE="5"        ADV_CONN_TIMEOUT="20"
             ADV_SESSION_TIMEOUT="45"     ADV_CLEANUP_INTERVAL="3"
-            ADV_KEEPALIVE_SEC="8"        ADV_DEAD_TIMEOUT_SEC="40"
+            ADV_KEEPALIVE_SEC="8"        ADV_DEAD_TIMEOUT_SEC="64"
             ;;
     esac
 }
@@ -491,7 +515,7 @@ ask_advanced() {
             echo ""
             echo -e "  ${BOLD}Heartbeat  (session-level keepalive, all transports except tun):${NC}"
             ask ADV_KEEPALIVE_SEC    "keepalive_sec       (sec)"    "5"
-            ask ADV_DEAD_TIMEOUT_SEC "dead_timeout_sec    (sec)"    "25"
+            ask ADV_DEAD_TIMEOUT_SEC "dead_timeout_sec    (sec)"    "40"
             echo ""
             echo -e "  ${BOLD}Buffers  (bytes, e.g. 4194304 = 4MB):${NC}"
             ask ADV_TCP_READ_BUF     "tcp_read_buffer     (bytes)"  "4194304"
@@ -639,12 +663,12 @@ write_client_config_tcp() {
     {
       "transport": "tcp",
       "addr": "%s:%s",
-      "connection_pool": 2,
+      "connection_pool": %s,
       "retry_interval": 3,
       "dial_timeout": 10
     }
   ],
-' "$psk" "$server_ip" "$server_port"; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: tcp
@@ -653,11 +677,11 @@ log_level: info
 paths:
   - transport: tcp
     addr: "%s:%s"
-    connection_pool: 2
+    connection_pool: %s
     retry_interval: 3
     dial_timeout: 10
 
-' "$psk" "$server_ip" "$server_port"; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -717,7 +741,7 @@ write_client_config_ws() {
     {
       "transport": "ws",
       "addr": "%s:%s",
-      "connection_pool": 2,
+      "connection_pool": %s,
       "retry_interval": 3,
       "dial_timeout": 10
     }
@@ -725,7 +749,7 @@ write_client_config_ws() {
   "ws_settings": {
     "path": "%s"
   },
-' "$psk" "$server_ip" "$server_port" "$ws_path"; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: ws
@@ -734,14 +758,14 @@ log_level: info
 paths:
   - transport: ws
     addr: "%s:%s"
-    connection_pool: 2
+    connection_pool: %s
     retry_interval: 3
     dial_timeout: 10
 
 ws_settings:
   path: "%s"
 
-' "$psk" "$server_ip" "$server_port" "$ws_path"; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -805,7 +829,7 @@ write_client_config_wss() {
     {
       "transport": "wss",
       "addr": "%s:%s",
-      "connection_pool": 2,
+      "connection_pool": %s,
       "retry_interval": 3,
       "dial_timeout": 10
     }
@@ -814,7 +838,7 @@ write_client_config_wss() {
     "path": "%s"
   },
   "tls_insecure": %s,
-' "$psk" "$server_ip" "$server_port" "$ws_path" "$tls_insecure"; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path" "$tls_insecure"; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: wss
@@ -823,7 +847,7 @@ log_level: info
 paths:
   - transport: wss
     addr: "%s:%s"
-    connection_pool: 2
+    connection_pool: %s
     retry_interval: 3
     dial_timeout: 10
 
@@ -832,7 +856,7 @@ ws_settings:
 
 tls_insecure: %s
 
-' "$psk" "$server_ip" "$server_port" "$ws_path" "$tls_insecure"; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path" "$tls_insecure"; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -943,7 +967,7 @@ write_client_config_https() {
     {
       "transport": "https",
       "addr": "%s:%s",
-      "connection_pool": 2,
+      "connection_pool": %s,
       "retry_interval": 3,
       "dial_timeout": 10
     }
@@ -953,7 +977,7 @@ write_client_config_https() {
     "path": "%s"
   },
   "tls_insecure": %s,
-' "$psk" "$server_ip" "$server_port" "$http_domain" "$http_path" "$tls_insecure"; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path" "$tls_insecure"; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: https
@@ -962,7 +986,7 @@ log_level: info
 paths:
   - transport: https
     addr: "%s:%s"
-    connection_pool: 2
+    connection_pool: %s
     retry_interval: 3
     dial_timeout: 10
 
@@ -972,7 +996,7 @@ http_settings:
 
 tls_insecure: %s
 
-' "$psk" "$server_ip" "$server_port" "$http_domain" "$http_path" "$tls_insecure"; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path" "$tls_insecure"; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1113,8 +1137,8 @@ write_client_config_quantum() {
 '
             printf '      "addr": "%s:%s",
 '  "$server_ip" "$server_port"
-            printf '      "connection_pool": 2,
-'
+            printf '      "connection_pool": %s,
+' "$CLIENT_CONN_POOL"
             printf '      "retry_interval": 3,
 '
             printf '      "dial_timeout": 10
@@ -1165,8 +1189,8 @@ write_client_config_quantum() {
 '
             printf '    addr: "%s:%s"
 '   "$server_ip" "$server_port"
-            printf '    connection_pool: 2
-'
+            printf '    connection_pool: %s
+' "$CLIENT_CONN_POOL"
             printf '    retry_interval: 3
 '
             printf '    dial_timeout: 10
@@ -1211,7 +1235,7 @@ write_client_config_http() {
     {
       "transport": "http",
       "addr": "%s:%s",
-      "connection_pool": 2,
+      "connection_pool": %s,
       "retry_interval": 3,
       "dial_timeout": 10
     }
@@ -1220,7 +1244,7 @@ write_client_config_http() {
     "fake_domain": "%s",
     "path": "%s"
   },
-' "$psk" "$server_ip" "$server_port" "$http_domain" "$http_path"; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: http
@@ -1229,7 +1253,7 @@ log_level: info
 paths:
   - transport: http
     addr: "%s:%s"
-    connection_pool: 2
+    connection_pool: %s
     retry_interval: 3
     dial_timeout: 10
 
@@ -1237,7 +1261,7 @@ http_settings:
   fake_domain: "%s"
   path: "%s"
 
-' "$psk" "$server_ip" "$server_port" "$http_domain" "$http_path"; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1784,6 +1808,10 @@ install_client() {
     ask_transport
     echo ""
 
+    if [ "$TRANSPORT" != "tun" ]; then
+        ask_connection_pool
+    fi
+
     while true; do
         echo -e "        Example : 1.1.1.1:8443"
         ask SERVER_ADDR "Server IP And Port" ""
@@ -2171,7 +2199,7 @@ edit_config() {
 
 show_banner() {
     echo ""
-    echo -e "  ${CYAN}${BOLD}DaggerConnect Installer - @DaggerConnect${NC}"
+    echo -e "  ${CYAN}${BOLD}DaggerConnect Installer${NC}  -  @DaggerConnect"
     echo ""
 }
 
