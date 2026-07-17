@@ -257,6 +257,27 @@ ask_ssl_client() {
     done
 }
 
+# Used during install_server/install_client: only cares whether a binary
+# exists at all. Never touches an existing binary regardless of its version
+# -- that's what the explicit "Update Core" menu action (download_binary)
+# is for. If nothing is installed yet, asks before downloading rather than
+# doing it silently.
+ensure_binary() {
+    if [ -f "$BINARY" ]; then
+        chmod +x "$BINARY"
+        return 0
+    fi
+
+    echo ""
+    warn "No DaggerConnect binary found at ${BINARY}."
+    ask DOWNLOAD_CHOICE "Download the latest release now? (y/n)" "y"
+    if [ "$DOWNLOAD_CHOICE" != "y" ] && [ "$DOWNLOAD_CHOICE" != "Y" ]; then
+        error "Cannot continue without a binary. Place one at ${BINARY} manually, or run this installer again and choose to download it."
+    fi
+
+    download_binary
+}
+
 download_binary() {
     echo ""
     step "Checking for the latest DaggerConnect release ..."
@@ -1604,7 +1625,7 @@ list_services() {
 
 install_server() {
     hr "Install Server"
-    download_binary
+    ensure_binary
     echo ""
 
     ask_service_name
@@ -1799,7 +1820,7 @@ install_server() {
 
 install_client() {
     hr "Install Client"
-    download_binary
+    ensure_binary
     echo ""
 
     ask_service_name
