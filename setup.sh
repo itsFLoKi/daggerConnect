@@ -414,7 +414,7 @@ SOCKS5_BIND=""
 # name and internal IP pair. Every other transport benefits from this: if
 # one connection drops (common on unstable links), the others keep traffic
 # flowing while it reconnects, instead of the whole tunnel going down.
-CLIENT_CONN_POOL="2"
+CLIENT_CONN_POOL="8"
 
 ask_connection_pool() {
     echo ""
@@ -422,7 +422,7 @@ ask_connection_pool() {
     echo -e "        Multiple parallel connections per path -- if one drops, the"
     echo -e "        others keep traffic flowing while it reconnects."
     echo ""
-    ask CLIENT_CONN_POOL "Connections per path" "2"
+    ask CLIENT_CONN_POOL "Connections per path" "8"
 }
 
 ask_socks5() {
@@ -463,7 +463,7 @@ apply_profile() {
             ADV_CHANNEL_BACKLOG="4096"   ADV_STREAM_CHAN_BUF="512"
             ADV_TCP_KEEPALIVE="1"        ADV_CONN_TIMEOUT="30"
             ADV_SESSION_TIMEOUT="60"     ADV_CLEANUP_INTERVAL="3"
-            ADV_KEEPALIVE_SEC="5"        ADV_DEAD_TIMEOUT_SEC="40"
+            ADV_KEEPALIVE_SEC="20"       ADV_DEAD_TIMEOUT_SEC="60"
             ;;
         aggressive)
             ADV_TCP_READ_BUF="16777216"  ADV_TCP_WRITE_BUF="16777216"
@@ -471,7 +471,7 @@ apply_profile() {
             ADV_CHANNEL_BACKLOG="8192"   ADV_STREAM_CHAN_BUF="2048"
             ADV_TCP_KEEPALIVE="1"        ADV_CONN_TIMEOUT="60"
             ADV_SESSION_TIMEOUT="120"    ADV_CLEANUP_INTERVAL="5"
-            ADV_KEEPALIVE_SEC="6"        ADV_DEAD_TIMEOUT_SEC="48"
+            ADV_KEEPALIVE_SEC="20"       ADV_DEAD_TIMEOUT_SEC="80"
             ;;
         low_latency)
             ADV_TCP_READ_BUF="2097152"   ADV_TCP_WRITE_BUF="2097152"
@@ -479,7 +479,7 @@ apply_profile() {
             ADV_CHANNEL_BACKLOG="2048"   ADV_STREAM_CHAN_BUF="256"
             ADV_TCP_KEEPALIVE="1"        ADV_CONN_TIMEOUT="15"
             ADV_SESSION_TIMEOUT="30"     ADV_CLEANUP_INTERVAL="2"
-            ADV_KEEPALIVE_SEC="4"        ADV_DEAD_TIMEOUT_SEC="24"
+            ADV_KEEPALIVE_SEC="10"       ADV_DEAD_TIMEOUT_SEC="30"
             ;;
         low_hardware)
             ADV_TCP_READ_BUF="524288"    ADV_TCP_WRITE_BUF="524288"
@@ -487,7 +487,7 @@ apply_profile() {
             ADV_CHANNEL_BACKLOG="512"    ADV_STREAM_CHAN_BUF="128"
             ADV_TCP_KEEPALIVE="5"        ADV_CONN_TIMEOUT="20"
             ADV_SESSION_TIMEOUT="45"     ADV_CLEANUP_INTERVAL="3"
-            ADV_KEEPALIVE_SEC="8"        ADV_DEAD_TIMEOUT_SEC="64"
+            ADV_KEEPALIVE_SEC="30"       ADV_DEAD_TIMEOUT_SEC="90"
             ;;
     esac
 }
@@ -535,8 +535,8 @@ ask_advanced() {
             ask ADV_CLEANUP_INTERVAL "cleanup_interval    (sec)"    "3"
             echo ""
             echo -e "  ${BOLD}Heartbeat  (session-level keepalive, all transports except tun):${NC}"
-            ask ADV_KEEPALIVE_SEC    "keepalive_sec       (sec)"    "5"
-            ask ADV_DEAD_TIMEOUT_SEC "dead_timeout_sec    (sec)"    "40"
+            ask ADV_KEEPALIVE_SEC    "keepalive_sec       (sec)"    "20"
+            ask ADV_DEAD_TIMEOUT_SEC "dead_timeout_sec    (sec)"    "60"
             echo ""
             echo -e "  ${BOLD}Buffers  (bytes, e.g. 4194304 = 4MB):${NC}"
             ask ADV_TCP_READ_BUF     "tcp_read_buffer     (bytes)"  "4194304"
