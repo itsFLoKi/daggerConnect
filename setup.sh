@@ -118,7 +118,7 @@ ask_transport() {
     echo "    3)  wss     — WebSocket Secure (TLS) tunnel"
     echo "    4)  http    — HTTP Mimicry tunnel"
     echo "    5)  https   — HTTP Mimicry Secure (TLS) tunnel"
-    echo "    6)  quantum — QuantumMux raw-packet tunnel"
+    echo "    6)  quantum — Raw-packet tunnel (KCP over forged TCP; auto NIC/IP/gateway)"
     echo "    7)  tun     — TUN kernel interface tunnel"
     echo ""
     while true; do
@@ -1022,224 +1022,90 @@ tls_insecure: %s
 }
 
 write_server_config_quantum() {
-    local port="$1" psk="$2" iface="$3" use_spoof="$4" spoof_src_ip="$5" client_spoof_ip="$6" client_real_ip="$7" use_dcpi="$8"
-    shift 8
+    local port="$1" psk="$2" mtu="$3" block="$4"
+    shift 4
     local ports_json ports_yaml
     ports_json=$(build_ports_json "$@")
     ports_yaml=$(build_ports_yaml "$@")
     mkdir -p "$CONFIG_DIR"
     if [ "$CONFIG_FMT" = "json" ]; then
-        {
-            printf '{
-'
-            printf '  "mode": "server",
-'
-            printf '  "transport": "quantum",
-'
-            printf '  "psk": "%s",
-'        "$psk"
-            printf '  "log_level": "info",
-'
-            printf '  "listeners": [
-'
-            printf '    {
-'
-            printf '      "addr": "0.0.0.0:%s",
-' "$port"
-            printf '      "transport": "quantum",
-'
-            printf '      "ports": [
-'
-            printf '%s
-'                    "$ports_json"
-            printf '      ]
-'
-            printf '    }
-'
-            printf '  ],
-'
-            printf '  "qSettings": {
-'
-            [ -n "$iface" ]       && printf '    "interface": "%s",
-'     "$iface"
-            [ "$use_spoof" = "yes" ] && printf '    "dcpi_mode": false,
-'
-            [ "$use_spoof" = "yes" ] && [ -n "$spoof_src_ip"    ] && printf '    "spoof_src_ip": "%s",
-'    "$spoof_src_ip"
-            [ "$use_spoof" = "yes" ] && [ -n "$client_spoof_ip" ] && printf '    "client_spoof_ip": "%s",
-' "$client_spoof_ip"
-            [ "$use_spoof" = "yes" ] && [ -n "$client_real_ip"  ] && printf '    "client_real_ip": "%s",
-'  "$client_real_ip"
-            [ "$use_dcpi"  = "yes" ] && printf '    "dcpi_mode": true,
-'
-            printf '    "mtu": 1280,
-'
-            printf '    "data_shard": 10,
-'
-            printf '    "parity_shard": 1
-'
-            printf '  },
-'
-            build_socks5_json
-            build_advanced_json
-            printf '}
-'
-        } > "$CONFIG"
+        {         printf '{
+  "mode": "server",
+  "transport": "quantum",
+  "psk": "%s",
+  "log_level": "info",
+  "listeners": [
+    {
+      "addr": "0.0.0.0:%s",
+      "transport": "quantum",
+      "ports": [
+%s
+      ]
+    }
+  ],
+  "quantum": {
+    "mtu": %s,
+    "block": "%s"
+  },
+' "$psk" "$port" "$ports_json" "$mtu" "$block"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
-        {
-            printf 'mode: server
-'
-            printf 'transport: quantum
-'
-            printf 'psk: "%s"
-'          "$psk"
-            printf 'log_level: info
-'
-            printf '
-'
-            printf 'listeners:
-'
-            printf '  - addr: "0.0.0.0:%s"
-' "$port"
-            printf '    transport: quantum
-'
-            printf '    ports:
-'
-            printf '%s
-'                  "$ports_yaml"
-            printf 'qSettings:
-'
-            [ -n "$iface" ]       && printf '  interface: "%s"
-'     "$iface"
-            [ "$use_spoof" = "yes" ] && printf '  dcpi_mode: false
-'
-            [ "$use_spoof" = "yes" ] && [ -n "$spoof_src_ip"    ] && printf '  spoof_src_ip: "%s"
-'    "$spoof_src_ip"
-            [ "$use_spoof" = "yes" ] && [ -n "$client_spoof_ip" ] && printf '  client_spoof_ip: "%s"
-' "$client_spoof_ip"
-            [ "$use_spoof" = "yes" ] && [ -n "$client_real_ip"  ] && printf '  client_real_ip: "%s"
-'  "$client_real_ip"
-            [ "$use_dcpi"  = "yes" ] && printf '  dcpi_mode: true
-'
-            printf '  mtu: 1280
-'
-            printf '  data_shard: 10
-'
-            printf '  parity_shard: 1
-'
-            printf '
-'
-            build_socks5_yaml
-            build_advanced_yaml
-        } > "$CONFIG"
+        {         printf 'mode: server
+transport: quantum
+psk: "%s"
+log_level: info
+listeners:
+  - addr: "0.0.0.0:%s"
+    transport: quantum
+    ports:
+%s
+quantum:
+  mtu: %s
+  block: "%s"
+
+' "$psk" "$port" "$ports_yaml" "$mtu" "$block"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
 write_client_config_quantum() {
-    local server_ip="$1" server_port="$2" psk="$3" iface="$4" use_spoof="$5" spoof_src_ip="$6" server_spoof_ip="$7" use_dcpi="$8"
+    local server_ip="$1" server_port="$2" psk="$3" mtu="$4" block="$5"
     mkdir -p "$CONFIG_DIR"
     if [ "$CONFIG_FMT" = "json" ]; then
-        {
-            printf '{
-'
-            printf '  "mode": "client",
-'
-            printf '  "transport": "quantum",
-'
-            printf '  "psk": "%s",
-'        "$psk"
-            printf '  "log_level": "info",
-'
-            printf '  "paths": [
-'
-            printf '    {
-'
-            printf '      "transport": "quantum",
-'
-            printf '      "addr": "%s:%s",
-'  "$server_ip" "$server_port"
-            printf '      "connection_pool": %s,
-' "$CLIENT_CONN_POOL"
-            printf '      "retry_interval": 3,
-'
-            printf '      "dial_timeout": 10
-'
-            printf '    }
-'
-            printf '  ],
-'
-            printf '  "qSettings": {
-'
-            [ -n "$iface" ]          && printf '    "interface": "%s",
-'      "$iface"
-            [ "$use_spoof" = "yes" ] && printf '    "dcpi_mode": false,
-'
-            [ "$use_spoof" = "yes" ] && [ -n "$spoof_src_ip"    ] && printf '    "spoof_src_ip": "%s",
-'    "$spoof_src_ip"
-            [ "$use_spoof" = "yes" ] && [ -n "$server_spoof_ip" ] && printf '    "server_spoof_ip": "%s",
-' "$server_spoof_ip"
-            [ "$use_dcpi"  = "yes" ] && printf '    "dcpi_mode": true,
-'
-            printf '    "mtu": 1280,
-'
-            printf '    "data_shard": 10,
-'
-            printf '    "parity_shard": 1
-'
-            printf '  },
-'
-            build_advanced_json
-            printf '}
-'
-        } > "$CONFIG"
+        {         printf '{
+  "mode": "client",
+  "transport": "quantum",
+  "psk": "%s",
+  "log_level": "info",
+  "paths": [
+    {
+      "transport": "quantum",
+      "addr": "%s:%s",
+      "connection_pool": %s,
+      "retry_interval": 3,
+      "dial_timeout": 10
+    }
+  ],
+  "quantum": {
+    "mtu": %s,
+    "block": "%s"
+  },
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$mtu" "$block"; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
-        {
-            printf 'mode: client
-'
-            printf 'transport: quantum
-'
-            printf 'psk: "%s"
-'          "$psk"
-            printf 'log_level: info
-'
-            printf '
-'
-            printf 'paths:
-'
-            printf '  - transport: quantum
-'
-            printf '    addr: "%s:%s"
-'   "$server_ip" "$server_port"
-            printf '    connection_pool: %s
-' "$CLIENT_CONN_POOL"
-            printf '    retry_interval: 3
-'
-            printf '    dial_timeout: 10
-'
-            printf '
-'
-            printf 'qSettings:
-'
-            [ -n "$iface" ]          && printf '  interface: "%s"
-'      "$iface"
-            [ "$use_spoof" = "yes" ] && printf '  dcpi_mode: false
-'
-            [ "$use_spoof" = "yes" ] && [ -n "$spoof_src_ip"    ] && printf '  spoof_src_ip: "%s"
-'    "$spoof_src_ip"
-            [ "$use_spoof" = "yes" ] && [ -n "$server_spoof_ip" ] && printf '  server_spoof_ip: "%s"
-' "$server_spoof_ip"
-            [ "$use_dcpi"  = "yes" ] && printf '  dcpi_mode: true
-'
-            printf '  mtu: 1280
-'
-            printf '  data_shard: 10
-'
-            printf '  parity_shard: 1
-'
-            printf '
-'
-            build_advanced_yaml
-        } > "$CONFIG"
+        {         printf 'mode: client
+transport: quantum
+psk: "%s"
+log_level: info
+paths:
+  - transport: quantum
+    addr: "%s:%s"
+    connection_pool: %s
+    retry_interval: 3
+    dial_timeout: 10
+
+quantum:
+  mtu: %s
+  block: "%s"
+
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$mtu" "$block"; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1651,27 +1517,11 @@ install_server() {
             echo ""
             ;;
         quantum)
-            ask QM_IFACE "Network interface  (leave empty for auto-detect)" ""
+            echo -e "  ${DIM}Quantum auto-detects the network interface, source IP, and${NC}"
+            echo -e "  ${DIM}gateway MAC at runtime — nothing to configure for those.${NC}"
             echo ""
-            ask QM_SPOOF_CHOICE "Enable Spoof Mode (y/n)" "n"
-            if [ "$QM_SPOOF_CHOICE" = "y" ] || [ "$QM_SPOOF_CHOICE" = "Y" ]; then
-                echo ""
-                ask QM_SPOOF_SRC    "Server Spoof IP  (spoof source IP, e.g. 1.2.3.4)" ""
-                ask QM_CLIENT_SPOOF "Client Spoof IP  (expected client spoof IP, optional)" ""
-                ask QM_CLIENT_REAL  "Client Real IP   (real client IP behind spoof, optional)" ""
-                QM_USE_SPOOF="yes"
-                QM_DCPI="no"
-            else
-                echo ""
-                ask QM_DCPI_CHOICE "Enable DCPI Mode  (proto58) (y/n)" "n"
-                QM_USE_SPOOF="no"
-                QM_SPOOF_SRC="" QM_CLIENT_SPOOF="" QM_CLIENT_REAL=""
-                if [ "$QM_DCPI_CHOICE" = "y" ] || [ "$QM_DCPI_CHOICE" = "Y" ]; then
-                    QM_DCPI="yes"
-                else
-                    QM_DCPI="no"
-                fi
-            fi
+            ask QM_MTU   "MTU" "1350"
+            ask QM_BLOCK "KCP header cipher  (aes/salsa20/none)" "aes"
             echo ""
             ;;
         tun)
@@ -1761,7 +1611,7 @@ install_server() {
         wss)     write_server_config_wss     "$PORT" "$PSK" "$WS_PATH" "$CERT_FILE" "$KEY_FILE" "${PORTS[@]}" ;;
         http)    write_server_config_http    "$PORT" "$PSK" "$HTTP_DOMAIN" "$HTTP_PATH" "${PORTS[@]}" ;;
         https)   write_server_config_https   "$PORT" "$PSK" "$HTTP_DOMAIN" "$HTTP_PATH" "$CERT_FILE" "$KEY_FILE" "${PORTS[@]}" ;;
-        quantum) write_server_config_quantum "$PORT" "$PSK" "$QM_IFACE" "$QM_USE_SPOOF" "$QM_SPOOF_SRC" "$QM_CLIENT_SPOOF" "$QM_CLIENT_REAL" "$QM_DCPI" "${PORTS[@]}" ;;
+        quantum) write_server_config_quantum "$PORT" "$PSK" "$QM_MTU" "$QM_BLOCK" "${PORTS[@]}" ;;
         tun)     write_server_config_tun     "$PORT" "$PSK" "$TUN_LOCAL_IP" "$TUN_PEER_IP" "$TUN_LOCAL_ADDR" "$TUN_REMOTE_ADDR" "$TUN_ENCAP" "$TUN_PROFILE" "$TUN_IFACE" "$TUN_SPOOF_SRC" "$TUN_SPOOF_DST" "$TUN_DCPI" "$TUN_NAME" "$TUN_HEARTBEAT_SEC" "$TUN_IDLE_TIMEOUT_SEC" "${PORTS[@]}" ;;
     esac
     ok "Config written: ${CONFIG}"
@@ -1797,9 +1647,9 @@ install_server() {
         echo -e "  Key         : ${BOLD}${KEY_FILE}${NC}"
     fi
     if [ "$TRANSPORT" = "quantum" ]; then
-        echo -e "  Interface : ${BOLD}$([ -n "$QM_IFACE" ] && echo "$QM_IFACE" || echo "auto-detect")${NC}"
-        echo -e "  Mode      : ${BOLD}$([ "$QM_USE_SPOOF" = "yes" ] && echo "Spoof (TCP)" || echo "DCPI (proto58)")${NC}"
-        [ "$QM_USE_SPOOF" = "yes" ] && [ -n "$QM_SPOOF_SRC" ] && echo -e "  Spoof IP  : ${BOLD}${QM_SPOOF_SRC}${NC}"
+        echo -e "  Interface : ${BOLD}auto-detect${NC}"
+        echo -e "  MTU       : ${BOLD}${QM_MTU}${NC}"
+        echo -e "  Block     : ${BOLD}${QM_BLOCK}${NC}"
     fi
     if [ "$TRANSPORT" = "tun" ]; then
         echo -e "  Encap     : ${BOLD}${TUN_ENCAP}${NC}"
@@ -1860,26 +1710,11 @@ install_client() {
             echo ""
             ;;
         quantum)
-            ask QM_IFACE "Network interface  (leave empty for auto-detect)" ""
+            echo -e "  ${DIM}Quantum auto-detects the network interface, source IP, and${NC}"
+            echo -e "  ${DIM}gateway MAC at runtime — nothing to configure for those.${NC}"
             echo ""
-            ask QM_SPOOF_CHOICE "Enable Spoof Mode (y/n)" "n"
-            if [ "$QM_SPOOF_CHOICE" = "y" ] || [ "$QM_SPOOF_CHOICE" = "Y" ]; then
-                echo ""
-                ask QM_SPOOF_SRC    "Client Spoof IP  (spoof source IP on client, e.g. 5.6.7.8)" ""
-                ask QM_SERVER_SPOOF "Server Spoof IP  (expected spoof IP from server, optional)" ""
-                QM_USE_SPOOF="yes"
-                QM_DCPI="no"
-            else
-                echo ""
-                ask QM_DCPI_CHOICE "Enable DCPI Mode  (proto58) (y/n)" "n"
-                QM_USE_SPOOF="no"
-                QM_SPOOF_SRC="" QM_SERVER_SPOOF=""
-                if [ "$QM_DCPI_CHOICE" = "y" ] || [ "$QM_DCPI_CHOICE" = "Y" ]; then
-                    QM_DCPI="yes"
-                else
-                    QM_DCPI="no"
-                fi
-            fi
+            ask QM_MTU   "MTU" "1350"
+            ask QM_BLOCK "KCP header cipher  (must match server, aes/salsa20/none)" "aes"
             echo ""
             ;;
         tun)
@@ -1954,7 +1789,7 @@ install_client() {
         wss)     write_client_config_wss     "$SERVER_IP" "$SERVER_PORT" "$PSK" "$WS_PATH" "$TLS_INSECURE" ;;
         http)    write_client_config_http    "$SERVER_IP" "$SERVER_PORT" "$PSK" "$HTTP_DOMAIN" "$HTTP_PATH" ;;
         https)   write_client_config_https   "$SERVER_IP" "$SERVER_PORT" "$PSK" "$HTTP_DOMAIN" "$HTTP_PATH" "$TLS_INSECURE" ;;
-        quantum) write_client_config_quantum "$SERVER_IP" "$SERVER_PORT" "$PSK" "$QM_IFACE" "$QM_USE_SPOOF" "$QM_SPOOF_SRC" "$QM_SERVER_SPOOF" "$QM_DCPI" ;;
+        quantum) write_client_config_quantum "$SERVER_IP" "$SERVER_PORT" "$PSK" "$QM_MTU" "$QM_BLOCK" ;;
         tun)     write_client_config_tun     "$SERVER_PORT" "$PSK" "$TUN_LOCAL_IP" "$TUN_PEER_IP" "$TUN_LOCAL_ADDR" "$TUN_REMOTE_ADDR" "$TUN_ENCAP" "$TUN_PROFILE" "$TUN_IFACE" "$TUN_SPOOF_SRC" "$TUN_SPOOF_DST" "$TUN_DCPI" "$TUN_NAME" "$TUN_HEARTBEAT_SEC" "$TUN_IDLE_TIMEOUT_SEC" ;;
     esac
     ok "Config written: ${CONFIG}"
@@ -1984,7 +1819,9 @@ install_client() {
         echo -e "  TLS Verify  : ${BOLD}$([ "$TLS_INSECURE" = "true" ] && echo "Skipped" || echo "Enabled")${NC}"
     fi
     if [ "$TRANSPORT" = "quantum" ]; then
-        echo -e "  Interface : ${BOLD}$([ -n "$QM_IFACE" ] && echo "$QM_IFACE" || echo "auto-detect")${NC}"
+        echo -e "  Interface : ${BOLD}auto-detect${NC}"
+        echo -e "  MTU       : ${BOLD}${QM_MTU}${NC}"
+        echo -e "  Block     : ${BOLD}${QM_BLOCK}${NC}"
     fi
     echo -e "  Config    : ${BOLD}${CONFIG}${NC}"
     echo ""
