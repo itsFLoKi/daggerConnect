@@ -555,6 +555,48 @@ ask_advanced() {
     info "Tuner Profile : ${ADV_PROFILE}$([ "$ADV_AUTO_TUNE" = "true" ] && echo " (adaptive)" || echo " (fixed)")"
 }
 
+build_healthcheck_json_server() {
+    printf '  "health_check": {
+    "enabled": true,
+    "port": 5550,
+    "interval_sec": 5,
+    "timeout_ms": 5000,
+    "max_consecutive_fails": 5
+  },
+'
+}
+
+build_healthcheck_json_client() {
+    printf '  "health_check": {
+    "enabled": true,
+    "interval_sec": 5,
+    "timeout_ms": 5000,
+    "max_consecutive_fails": 5
+  },
+'
+}
+
+build_healthcheck_yaml_server() {
+    printf "health_check:
+  enabled: true
+  port: 5550
+  interval_sec: 5
+  timeout_ms: 5000
+  max_consecutive_fails: 5
+
+"
+}
+
+build_healthcheck_yaml_client() {
+    printf "health_check:
+  enabled: true
+  interval_sec: 5
+  timeout_ms: 5000
+  max_consecutive_fails: 5
+
+"
+}
+
 build_advanced_json() {
     printf '  "advanced": {
 '
@@ -656,7 +698,7 @@ write_server_config_tcp() {
       ]
     }
   ],
-' "$psk" "$port" "$ports_json"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$ports_json"; build_healthcheck_json_server; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: tcp
@@ -667,7 +709,7 @@ listeners:
     transport: tcp
     ports:
 %s
-' "$psk" "$port" "$ports_yaml"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$ports_yaml"; build_healthcheck_yaml_server; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -689,7 +731,7 @@ write_client_config_tcp() {
       "dial_timeout": 10
     }
   ],
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_healthcheck_json_client; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: tcp
@@ -702,7 +744,7 @@ paths:
     retry_interval: 3
     dial_timeout: 10
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_healthcheck_yaml_client; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -731,7 +773,7 @@ write_server_config_ws() {
   "ws_settings": {
     "path": "%s"
   },
-' "$psk" "$port" "$ports_json" "$ws_path"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$ports_json" "$ws_path"; build_healthcheck_json_server; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: ws
@@ -745,7 +787,7 @@ listeners:
 ws_settings:
   path: "%s"
 
-' "$psk" "$port" "$ports_yaml" "$ws_path"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$ports_yaml" "$ws_path"; build_healthcheck_yaml_server; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -770,7 +812,7 @@ write_client_config_ws() {
   "ws_settings": {
     "path": "%s"
   },
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_healthcheck_json_client; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: ws
@@ -786,7 +828,7 @@ paths:
 ws_settings:
   path: "%s"
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_healthcheck_yaml_client; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -817,7 +859,7 @@ write_server_config_wss() {
   "ws_settings": {
     "path": "%s"
   },
-' "$psk" "$port" "$cert" "$key" "$ports_json" "$ws_path"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$cert" "$key" "$ports_json" "$ws_path"; build_healthcheck_json_server; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: wss
@@ -833,7 +875,7 @@ listeners:
 ws_settings:
   path: "%s"
 
-' "$psk" "$port" "$cert" "$key" "$ports_yaml" "$ws_path"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$cert" "$key" "$ports_yaml" "$ws_path"; build_healthcheck_yaml_server; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -859,7 +901,7 @@ write_client_config_wss() {
     "path": "%s"
   },
   "tls_insecure": %s,
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path" "$tls_insecure"; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path" "$tls_insecure"; build_healthcheck_json_client; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: wss
@@ -877,7 +919,7 @@ ws_settings:
 
 tls_insecure: %s
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path" "$tls_insecure"; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path" "$tls_insecure"; build_healthcheck_yaml_client; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -907,7 +949,7 @@ write_server_config_http() {
     "fake_domain": "%s",
     "path": "%s"
   },
-' "$psk" "$port" "$ports_json" "$http_domain" "$http_path"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$ports_json" "$http_domain" "$http_path"; build_healthcheck_json_server; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: http
@@ -922,7 +964,7 @@ http_settings:
   fake_domain: "%s"
   path: "%s"
 
-' "$psk" "$port" "$ports_yaml" "$http_domain" "$http_path"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$ports_yaml" "$http_domain" "$http_path"; build_healthcheck_yaml_server; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -954,7 +996,7 @@ write_server_config_https() {
     "fake_domain": "%s",
     "path": "%s"
   },
-' "$psk" "$port" "$cert" "$key" "$ports_json" "$http_domain" "$http_path"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$cert" "$key" "$ports_json" "$http_domain" "$http_path"; build_healthcheck_json_server; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: https
@@ -971,7 +1013,7 @@ http_settings:
   fake_domain: "%s"
   path: "%s"
 
-' "$psk" "$port" "$cert" "$key" "$ports_yaml" "$http_domain" "$http_path"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$cert" "$key" "$ports_yaml" "$http_domain" "$http_path"; build_healthcheck_yaml_server; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -998,7 +1040,7 @@ write_client_config_https() {
     "path": "%s"
   },
   "tls_insecure": %s,
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path" "$tls_insecure"; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path" "$tls_insecure"; build_healthcheck_json_client; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: https
@@ -1017,7 +1059,7 @@ http_settings:
 
 tls_insecure: %s
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path" "$tls_insecure"; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path" "$tls_insecure"; build_healthcheck_yaml_client; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1047,7 +1089,7 @@ write_server_config_quantum() {
     "mtu": %s,
     "block": "%s"
   },
-' "$psk" "$port" "$ports_json" "$mtu" "$block"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$ports_json" "$mtu" "$block"; build_healthcheck_json_server; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: quantum
@@ -1062,7 +1104,7 @@ quantum:
   mtu: %s
   block: "%s"
 
-' "$psk" "$port" "$ports_yaml" "$mtu" "$block"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$ports_yaml" "$mtu" "$block"; build_healthcheck_yaml_server; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1088,7 +1130,7 @@ write_client_config_quantum() {
     "mtu": %s,
     "block": "%s"
   },
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$mtu" "$block"; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$mtu" "$block"; build_healthcheck_json_client; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: quantum
@@ -1105,7 +1147,7 @@ quantum:
   mtu: %s
   block: "%s"
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$mtu" "$block"; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$mtu" "$block"; build_healthcheck_yaml_client; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1131,7 +1173,7 @@ write_client_config_http() {
     "fake_domain": "%s",
     "path": "%s"
   },
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_healthcheck_json_client; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: http
@@ -1148,7 +1190,7 @@ http_settings:
   fake_domain: "%s"
   path: "%s"
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_healthcheck_yaml_client; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
