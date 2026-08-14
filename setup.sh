@@ -111,15 +111,37 @@ ask_service_name() {
     info "Config File  : ${CONFIG}"
 }
 
+detect_server_public_ip() {
+    if [ -n "$DC_SERVER_PUBLIC_IP" ]; then
+        echo "$DC_SERVER_PUBLIC_IP"
+        return 0
+    fi
+
+    local ip svc
+    for svc in "https://api.ipify.org" "https://ifconfig.me/ip" "https://icanhazip.com"; do
+        ip=$(curl -fsSL --connect-timeout 5 --max-time 8 "$svc" 2>/dev/null | tr -d '[:space:]')
+        if echo "$ip" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
+            echo "$ip"
+            return 0
+        fi
+    done
+
+    ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
+    if [ -n "$ip" ]; then
+        echo "$ip"
+        return 0
+    fi
+
+    return 1
+}
+
 ask_server_public_ip() {
     echo ""
-    local detected
-    detected=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
-    echo -e "  ${DIM}The launcher needs this server's public IP to match it against your${NC}"
-    echo -e "  ${DIM}license record on the license server. If this machine is behind NAT${NC}"
-    echo -e "  ${DIM}or has multiple interfaces, correct it to the real public IP.${NC}"
-    ask SERVER_PUBLIC_IP "This server's public IP" "$detected"
-    info "Public IP : ${SERVER_PUBLIC_IP}"
+    SERVER_PUBLIC_IP=$(detect_server_public_ip)
+    if [ -z "$SERVER_PUBLIC_IP" ]; then
+        error "Could not auto-detect this server's public IP (no route to the detection services, and no default route found). Set it manually and re-run: DC_SERVER_PUBLIC_IP=<your public IP> bash setup.sh"
+    fi
+    info "Public IP : ${SERVER_PUBLIC_IP}  (auto-detected)"
 }
 
 ask_transport() {
@@ -1689,7 +1711,9 @@ install_server() {
     ask_service_name
     echo ""
 
-    ask_version server
+    CHANNEL="release"
+    VERSION="latest"
+    info "Version : ${VERSION} (${CHANNEL})"
     echo ""
 
     ask_server_public_ip
@@ -1873,7 +1897,9 @@ install_client() {
     ask_service_name
     echo ""
 
-    ask_version client
+    CHANNEL="release"
+    VERSION="latest"
+    info "Version : ${VERSION} (${CHANNEL})"
     echo ""
 
     ask_transport
