@@ -9,15 +9,16 @@ DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-BINARY="/usr/local/bin/DaggerConnect"
-GITHUB_REPO="itsFLoKi/daggerConnect"
-LATEST_RELEASE_API="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+LAUNCHER="/usr/local/bin/DaggerLauncher"
 CONFIG_DIR="/etc/DaggerConnect"
 CONFIG=""
 CONFIG_FMT=""
 SERVICE_NAME=""
 SERVICE_FILE=""
 TRANSPORT=""
+CHANNEL=""
+VERSION=""
+SERVER_PUBLIC_IP=""
 SSL_MODE=""
 DOMAIN=""
 CERT_FILE=""
@@ -108,6 +109,17 @@ ask_service_name() {
     echo ""
     info "Service Name : ${SERVICE_NAME}"
     info "Config File  : ${CONFIG}"
+}
+
+ask_server_public_ip() {
+    echo ""
+    local detected
+    detected=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
+    echo -e "  ${DIM}The launcher needs this server's public IP to match it against your${NC}"
+    echo -e "  ${DIM}license record on the license server. If this machine is behind NAT${NC}"
+    echo -e "  ${DIM}or has multiple interfaces, correct it to the real public IP.${NC}"
+    ask SERVER_PUBLIC_IP "This server's public IP" "$detected"
+    info "Public IP : ${SERVER_PUBLIC_IP}"
 }
 
 ask_transport() {
@@ -257,101 +269,202 @@ ask_ssl_client() {
     done
 }
 
-# Used during install_server/install_client: only cares whether a binary
-# exists at all. Never touches an existing binary regardless of its version
-# -- that's what the explicit "Update Core" menu action (download_binary)
-# is for. If nothing is installed yet, asks before downloading rather than
-# doing it silently.
-ensure_binary() {
-    if [ -f "$BINARY" ]; then
-        chmod +x "$BINARY"
-        return 0
+check_ptrace_scope() {
+    local f=/proc/sys/kernel/yama/ptrace_scope
+    [ -r "$f" ] || return 0
+    local val
+    val=$(cat "$f" 2>/dev/null)
+    if [ "$val" = "0" ]; then
+        echo ""
+        warn "kernel.yama.ptrace_scope is 0 -- any same-user process can ptrace-attach and dump this binary from memory."
+        echo -e "  ${DIM}Recommended: sysctl -w kernel.yama.ptrace_scope=2   (or 3, which needs a reboot to undo)${NC}"
+        echo -e "  ${DIM}Persist across reboots: echo 'kernel.yama.ptrace_scope=2' >> /etc/sysctl.d/99-daggerconnect.conf${NC}"
     fi
-
-    echo ""
-    warn "No DaggerConnect binary found at ${BINARY}."
-    ask DOWNLOAD_CHOICE "Download the latest release now? (y/n)" "y"
-    if [ "$DOWNLOAD_CHOICE" != "y" ] && [ "$DOWNLOAD_CHOICE" != "Y" ]; then
-        error "Cannot continue without a binary. Place one at ${BINARY} manually, or run this installer again and choose to download it."
-    fi
-
-    download_binary
 }
 
-download_binary() {
-    echo ""
-    step "Checking for the latest DaggerConnect release ..."
-
-    LATEST_VERSION=$(curl -fsSL "$LATEST_RELEASE_API" 2>/dev/null | grep '"tag_name":' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-
-    if [ -z "$LATEST_VERSION" ]; then
-        warn "Could not reach GitHub to check the latest version."
-        if [ -f "$BINARY" ]; then
-            chmod +x "$BINARY"
-            ok "Using existing local binary: ${BINARY}"
-            return 0
-        fi
-        error "No local binary found and GitHub is unreachable. Cannot continue."
-    fi
-
-    info "Latest release: ${LATEST_VERSION}"
-
-    CURRENT_VERSION=""
-    if [ -f "$BINARY" ]; then
-        chmod +x "$BINARY"
-        CURRENT_VERSION=$("$BINARY" -v 2>&1 | grep -oE 'v?[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
-    fi
-
-    if [ -n "$CURRENT_VERSION" ] && [ "$CURRENT_VERSION" = "$LATEST_VERSION" ]; then
-        ok "Already on the latest version (${CURRENT_VERSION})."
+ensure_launcher() {
+    local role="$1"
+    if [ -f "$LAUNCHER" ]; then
+        chmod +x "$LAUNCHER"
         return 0
     fi
 
-    if [ -n "$CURRENT_VERSION" ]; then
-        step "Updating DaggerConnect: ${CURRENT_VERSION} -> ${LATEST_VERSION} ..."
-    else
-        step "Downloading DaggerConnect ${LATEST_VERSION} ..."
+    local github_url="https://github.com/itsFLoKi/daggerConnect/releases/download/v1/DaggerLauncher"
+
+    info "Downloading DaggerLauncher..."
+    if ! curl -fsSL --connect-timeout 10 --max-time 60 -o "$LAUNCHER" "$github_url"; then
+        error "Failed to download DaggerLauncher -- check network/DNS, or place the binary at ${LAUNCHER} yourself (chmod +x) and re-run."
+    fi
+    chmod +x "$LAUNCHER"
+    ok "DaggerLauncher downloaded"
+}
+
+ask_version() {
+    local role="$1"
+    local url="https://api.github.com/repos/itsFLoKi/daggerConnect/releases"
+
+    echo ""
+    info "Fetching available versions..."
+    local json
+    json=$(curl -fsSL --connect-timeout 10 --max-time 20 -H "Accept: application/vnd.github+json" "$url" 2>/dev/null)
+
+    local labels=() chans=() vers=()
+    if [ -n "$json" ]; then
+        local tags prereleases drafts
+        tags=$(echo "$json" | grep -oP '"tag_name"\s*:\s*"\K[^"]+')
+        prereleases=$(echo "$json" | grep -oP '"prerelease"\s*:\s*\K(true|false)')
+        drafts=$(echo "$json" | grep -oP '"draft"\s*:\s*\K(true|false)')
+
+        mapfile -t tag_arr <<< "$tags"
+        mapfile -t pre_arr <<< "$prereleases"
+        mapfile -t draft_arr <<< "$drafts"
+
+        local n="${#tag_arr[@]}"
+        local i t p d
+        for ((i = 0; i < n; i++)); do
+            t="${tag_arr[$i]}"
+            p="${pre_arr[$i]:-false}"
+            d="${draft_arr[$i]:-false}"
+            [ -z "$t" ] && continue
+            [ "$d" = "true" ] && continue
+            if [ "$p" = "true" ]; then
+                labels+=("${t}  (beta)")
+                chans+=("beta")
+            else
+                labels+=("${t}  (release)")
+                chans+=("release")
+            fi
+            vers+=("$t")
+        done
     fi
 
-    BINARY_URL="https://github.com/${GITHUB_REPO}/releases/download/${LATEST_VERSION}/DaggerConnect"
-    mkdir -p "$(dirname "$BINARY")"
+    if [ "${#labels[@]}" -eq 0 ]; then
+        warn "Could not fetch a version list (offline install? DNS issue?) -- falling back to manual entry."
+        ask_channel_manual
+        return
+    fi
 
-    [ -f "$BINARY" ] && cp "$BINARY" "${BINARY}.backup"
+    echo ""
+    echo -e "  ${BOLD}Available versions:${NC}"
+    local i=1
+    for label in "${labels[@]}"; do
+        echo "    ${i})  ${label}"
+        i=$((i + 1))
+    done
+    echo ""
 
-    if curl -fL --progress-bar "$BINARY_URL" -o "${BINARY}.new"; then
-        chmod +x "${BINARY}.new"
-        if "${BINARY}.new" -v >/dev/null 2>&1; then
-            mv -f "${BINARY}.new" "$BINARY"
-            rm -f "${BINARY}.backup"
-            ok "DaggerConnect updated to ${LATEST_VERSION}."
-
-            mapfile -t SERVICES < <(list_services)
-            if [ ${#SERVICES[@]} -gt 0 ]; then
-                echo ""
-                warn "Running services are still using the old binary in memory until restarted."
-                ask RESTART_CHOICE "Restart all DaggerConnect services now? (y/n)" "y"
-                if [ "$RESTART_CHOICE" = "y" ] || [ "$RESTART_CHOICE" = "Y" ]; then
-                    for svc in "${SERVICES[@]}"; do
-                        systemctl restart "$svc" && ok "Restarted: ${svc}" || warn "Failed to restart: ${svc}"
-                    done
-                fi
-            fi
-        else
-            rm -f "${BINARY}.new"
-            warn "Downloaded binary failed to run -- keeping the previous version."
-            [ -f "${BINARY}.backup" ] && mv -f "${BINARY}.backup" "$BINARY"
+    while true; do
+        ask VER_CHOICE "Pick a version" "1"
+        if echo "$VER_CHOICE" | grep -qE '^[0-9]+$' && [ "$VER_CHOICE" -ge 1 ] 2>/dev/null && [ "$VER_CHOICE" -le "${#labels[@]}" ] 2>/dev/null; then
+            local idx=$((VER_CHOICE - 1))
+            CHANNEL="${chans[$idx]}"
+            VERSION="${vers[$idx]}"
+            break
         fi
+        warn "Please enter a number between 1 and ${#labels[@]}."
+    done
+    info "Selected : ${VERSION} (${CHANNEL})"
+}
+
+ask_channel_manual() {
+    echo ""
+    echo -e "  ${BOLD}Release Channel:${NC}"
+    echo "    1)  release  — Stable (recommended)"
+    echo "    2)  beta     — Early access to new features, may be less stable"
+    echo ""
+    while true; do
+        ask CH_CHOICE "Channel" "1"
+        case "$CH_CHOICE" in
+            1|release) CHANNEL="release"; break ;;
+            2|beta)    CHANNEL="beta";    break ;;
+            *) warn "Please enter 1 (release) or 2 (beta)." ;;
+        esac
+    done
+    info "Channel : ${CHANNEL}"
+
+    echo ""
+    echo -e "  ${DIM}Pin a specific version (e.g. v3.3.1), or leave empty to always${NC}"
+    echo -e "  ${DIM}track the newest version released on the '${CHANNEL}' channel.${NC}"
+    while true; do
+        ask VER_INPUT "Version  (empty = latest)" ""
+        if [ -z "$VER_INPUT" ]; then
+            VERSION="latest"
+            break
+        fi
+        if echo "$VER_INPUT" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            VERSION="$VER_INPUT"
+            break
+        fi
+        warn "Invalid format. Use vN.N.N (e.g. v3.3.1), or leave empty for latest."
+    done
+    info "Version : ${VERSION}"
+}
+
+switch_channel() {
+    hr "Switch Release Channel / Version"
+    echo ""
+    pick_service "Switch channel for" || return 0
+    local svc="${PICKED_SVC%.service}"
+    local svc_file="/etc/systemd/system/${PICKED_SVC}"
+
+    local cur_channel="release" cur_version="latest"
+    if grep -q '^Environment=DC_CHANNEL=' "$svc_file" 2>/dev/null; then
+        cur_channel=$(grep '^Environment=DC_CHANNEL=' "$svc_file" | head -1 | sed -E 's/^Environment=DC_CHANNEL=//')
+    fi
+    if grep -q '^Environment=DC_VERSION=' "$svc_file" 2>/dev/null; then
+        cur_version=$(grep '^Environment=DC_VERSION=' "$svc_file" | head -1 | sed -E 's/^Environment=DC_VERSION=//')
+    fi
+    echo ""
+    info "Current: channel=${cur_channel} version=${cur_version}"
+
+    local svc_role=""
+    for cfg_candidate in "${CONFIG_DIR}/${svc}.json" "${CONFIG_DIR}/${svc}.yaml"; do
+        [ -f "$cfg_candidate" ] || continue
+        if grep -qE '"mode"[[:space:]]*:[[:space:]]*"server"|^[[:space:]]*mode[[:space:]]*:[[:space:]]*server' "$cfg_candidate"; then
+            svc_role="server"; break
+        elif grep -qE '"mode"[[:space:]]*:[[:space:]]*"client"|^[[:space:]]*mode[[:space:]]*:[[:space:]]*client' "$cfg_candidate"; then
+            svc_role="client"; break
+        fi
+    done
+
+    if [ -n "$svc_role" ]; then
+        ask_version "$svc_role"
     else
-        rm -f "${BINARY}.new"
-        warn "Download failed."
-        if [ -f "${BINARY}.backup" ]; then
-            mv -f "${BINARY}.backup" "$BINARY"
-            warn "Keeping existing binary."
-        elif [ -f "$BINARY" ]; then
-            ok "Using existing binary: ${BINARY}"
+        warn "Could not determine whether '${svc}' is a server or client from its config -- falling back to manual entry."
+        ask_channel_manual
+    fi
+    local new_channel="$CHANNEL" new_version="$VERSION"
+
+    if [ "$new_channel" = "$cur_channel" ] && [ "$new_version" = "$cur_version" ]; then
+        ok "Already on channel=${cur_channel} version=${cur_version}. Nothing to do."
+        return 0
+    fi
+
+    set_unit_env() {
+        local key="$1" val="$2"
+        if grep -q "^Environment=${key}=" "$svc_file"; then
+            sed -i "s|^Environment=${key}=.*|Environment=${key}=${val}|" "$svc_file"
         else
-            error "No binary available and download failed. Cannot continue."
+            sed -i "/^\[Service\]/a Environment=${key}=${val}" "$svc_file"
         fi
+    }
+
+    set_unit_env DC_CHANNEL "$new_channel"
+    set_unit_env DC_VERSION "$new_version"
+    systemctl daemon-reload
+
+    step "Restarting ${svc} on channel=${new_channel} version=${new_version} ..."
+    systemctl restart "$svc"
+    sleep 2
+    if systemctl is-active --quiet "$svc"; then
+        ok "Now running on channel=${new_channel} version=${new_version}."
+    else
+        warn "Service failed to start on the new setting -- reverting. Logs:"
+        journalctl -u "$svc" -n 20 --no-pager
+        set_unit_env DC_CHANNEL "$cur_channel"
+        set_unit_env DC_VERSION "$cur_version"
+        systemctl daemon-reload
+        systemctl restart "$svc"
     fi
 }
 
@@ -360,15 +473,31 @@ ask_ports() {
     echo -e "  Ports to forward. One per line, or comma-separated. Empty line when done."
     echo -e "        Example : 22                   (bind :22 -> target :22)"
     echo -e "        Example : 2222=22              (bind :2222 -> target :22)"
-    echo -e "        Example : 800,3005,4155,6550   (multiple at once)"
+    echo -e "        Example : 800,3005,4155,6550   (multiple at once, same type)"
+    echo -e "  ${DIM}You'll be asked TCP or UDP for each line. Most things (websites, SSH, RDP) are TCP;${NC}"
+    echo -e "  ${DIM}VPN-style tools (WireGuard, Cisco AnyConnect) are UDP.${NC}"
     PORTS=()
     while true; do
         ask P "Port" ""
         [ -z "$P" ] && break
+        local ptype
+        while true; do
+            ask ptype "Type for '$P' - tcp or udp" "tcp"
+            ptype="$(echo "$ptype" | tr '[:upper:]' '[:lower:]')"
+            case "$ptype" in
+                tcp|udp) break ;;
+                *) warn "Please type 'tcp' or 'udp'." ;;
+            esac
+        done
         IFS="," read -ra _parts <<< "$P"
         for _p in "${_parts[@]}"; do
             _p="${_p// /}"
-            [ -n "$_p" ] && PORTS+=("$_p")
+            [ -z "$_p" ] && continue
+            if [[ "$_p" == */* ]]; then
+                PORTS+=("$_p")
+            else
+                PORTS+=("${_p}/${ptype}")
+            fi
         done
     done
     if [ ${#PORTS[@]} -eq 0 ]; then
@@ -377,43 +506,56 @@ ask_ports() {
     fi
 }
 
+parse_port_entry() {
+    local entry="$1" ptype="tcp" pbind ptarget
+    if [[ "$entry" == */* ]]; then
+        ptype="${entry##*/}"
+        entry="${entry%/*}"
+        ptype="$(echo "$ptype" | tr '[:upper:]' '[:lower:]')"
+        case "$ptype" in
+            udp|both|any) ;;
+            *) ptype="tcp" ;;
+        esac
+    fi
+    if [[ "$entry" == *=* ]]; then
+        pbind="${entry%%=*}"
+        ptarget="${entry#*=}"
+    else
+        pbind="$entry"
+        ptarget="$entry"
+    fi
+    echo "${ptype}|${pbind}|${ptarget}"
+}
+
 build_ports_json() {
-    local first=1
+    local first=1 p ptype pbind ptarget
     for p in "$@"; do
+        IFS='|' read -r ptype pbind ptarget <<< "$(parse_port_entry "$p")"
         if [ "$first" = "1" ]; then
-            printf '    "%s"' "$p"
+            printf '    { "type": "%s", "bind": "0.0.0.0:%s", "target": "127.0.0.1:%s" }' "$ptype" "$pbind" "$ptarget"
             first=0
         else
             printf ',
-    "%s"' "$p"
+    { "type": "%s", "bind": "0.0.0.0:%s", "target": "127.0.0.1:%s" }' "$ptype" "$pbind" "$ptarget"
         fi
     done
     echo ""
 }
 
 build_ports_yaml() {
-    # FIX: was emitting "  - value" (2-space indent). Every caller places
-    # "ports:" itself at 4-space indent (nested under a listener list item),
-    # so children need 6 spaces to actually nest under it -- at 2 spaces
-    # they instead became a second, malformed entry of the outer listeners
-    # list itself (a bare string sibling next to the listener dict), and
-    # "ports" parsed as an empty/null field. This affected every transport,
-    # since they all share this one function.
+    local p ptype pbind ptarget
     for p in "$@"; do
-        printf '      - "%s"
-' "$p"
+        IFS='|' read -r ptype pbind ptarget <<< "$(parse_port_entry "$p")"
+        printf '      - type: "%s"
+        bind: "0.0.0.0:%s"
+        target: "127.0.0.1:%s"
+' "$ptype" "$pbind" "$ptarget"
     done
 }
 
 SOCKS5_ENABLED="false"
 SOCKS5_BIND=""
 
-# ── client-side connection pool (redundant parallel connections per path) ──
-# Not offered for tun: a TUN link is a single point-to-point interface, so
-# multiple simultaneous sessions would just fight over the same interface
-# name and internal IP pair. Every other transport benefits from this: if
-# one connection drops (common on unstable links), the others keep traffic
-# flowing while it reconnects, instead of the whole tunnel going down.
 CLIENT_CONN_POOL="8"
 
 ask_connection_pool() {
@@ -693,7 +835,7 @@ write_server_config_tcp() {
     {
       "addr": "0.0.0.0:%s",
       "transport": "tcp",
-      "ports": [
+      "maps": [
 %s
       ]
     }
@@ -707,7 +849,7 @@ log_level: info
 listeners:
   - addr: "0.0.0.0:%s"
     transport: tcp
-    ports:
+    maps:
 %s
 ' "$psk" "$port" "$ports_yaml"; build_healthcheck_yaml_server; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
@@ -765,7 +907,7 @@ write_server_config_ws() {
     {
       "addr": "0.0.0.0:%s",
       "transport": "ws",
-      "ports": [
+      "maps": [
 %s
       ]
     }
@@ -782,7 +924,7 @@ log_level: info
 listeners:
   - addr: "0.0.0.0:%s"
     transport: ws
-    ports:
+    maps:
 %s
 ws_settings:
   path: "%s"
@@ -851,7 +993,7 @@ write_server_config_wss() {
       "transport": "wss",
       "cert_file": "%s",
       "key_file": "%s",
-      "ports": [
+      "maps": [
 %s
       ]
     }
@@ -870,7 +1012,7 @@ listeners:
     transport: wss
     cert_file: "%s"
     key_file: "%s"
-    ports:
+    maps:
 %s
 ws_settings:
   path: "%s"
@@ -940,7 +1082,7 @@ write_server_config_http() {
     {
       "addr": "0.0.0.0:%s",
       "transport": "http",
-      "ports": [
+      "maps": [
 %s
       ]
     }
@@ -958,7 +1100,7 @@ log_level: info
 listeners:
   - addr: "0.0.0.0:%s"
     transport: http
-    ports:
+    maps:
 %s
 http_settings:
   fake_domain: "%s"
@@ -987,7 +1129,7 @@ write_server_config_https() {
       "transport": "https",
       "cert_file": "%s",
       "key_file": "%s",
-      "ports": [
+      "maps": [
 %s
       ]
     }
@@ -1007,7 +1149,7 @@ listeners:
     transport: https
     cert_file: "%s"
     key_file: "%s"
-    ports:
+    maps:
 %s
 http_settings:
   fake_domain: "%s"
@@ -1080,7 +1222,7 @@ write_server_config_quantum() {
     {
       "addr": "0.0.0.0:%s",
       "transport": "quantum",
-      "ports": [
+      "maps": [
 %s
       ]
     }
@@ -1098,7 +1240,7 @@ log_level: info
 listeners:
   - addr: "0.0.0.0:%s"
     transport: quantum
-    ports:
+    maps:
 %s
 quantum:
   mtu: %s
@@ -1223,7 +1365,7 @@ write_server_config_tun() {
             printf '      "addr": "0.0.0.0:%s",\n' "$port"
             printf '      "transport": "tun",
 '
-            printf '      "ports": [
+            printf '      "maps": [
 '
             printf '%s
 '                   "$ports_json"
@@ -1293,7 +1435,7 @@ write_server_config_tun() {
             printf '  - addr: "0.0.0.0:%s"\n' "$port"
             printf '    transport: tun
 '
-            printf '    ports:
+            printf '    maps:
 '
             printf '%s
 '               "$ports_yaml"
@@ -1484,6 +1626,10 @@ write_client_config_tun() {
 }
 
 install_service() {
+    local extra_env=""
+    if [ -n "$SERVER_PUBLIC_IP" ]; then
+        extra_env="Environment=DC_SERVER_PUBLIC_IP=${SERVER_PUBLIC_IP}"
+    fi
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=DaggerConnect Tunnel (${SERVICE_NAME})
@@ -1492,7 +1638,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${BINARY} -c ${CONFIG}
+Environment=DC_CHANNEL=${CHANNEL:-release}
+Environment=DC_VERSION=${VERSION:-latest}
+${extra_env}
+ExecStart=${LAUNCHER} -c ${CONFIG}
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -1533,10 +1682,17 @@ list_services() {
 
 install_server() {
     hr "Install Server"
-    ensure_binary
+    ensure_launcher server
+    check_ptrace_scope
     echo ""
 
     ask_service_name
+    echo ""
+
+    ask_version server
+    echo ""
+
+    ask_server_public_ip
     echo ""
 
     ask_transport
@@ -1605,11 +1761,6 @@ install_server() {
             echo ""
             ask_required TUN_LOCAL_ADDR  "TUN local IP   (server side, any IP, e.g. 10.0.0.1)"
             ask_required TUN_REMOTE_ADDR "TUN remote IP  (client side, any IP, e.g. 10.0.0.2)"
-            # NOTE: entered as a bare IP, no /xx suffix needed or wanted --
-            # tunIfaceCreate() strips any suffix you give it anyway and
-            # always configures the interface as /32 point-to-point
-            # internally, so writing "10.0.0.1/24" here would be actively
-            # misleading (it's never actually used as a /24).
             TUN_LOCAL_ADDR="$(echo "$TUN_LOCAL_ADDR" | cut -d/ -f1)"
             TUN_REMOTE_ADDR="$(echo "$TUN_REMOTE_ADDR" | cut -d/ -f1)"
             echo ""
@@ -1665,6 +1816,9 @@ install_server() {
     echo -e "${GREEN}${BOLD}  Server installed successfully.${NC}"
     echo ""
     echo -e "  Service   : ${BOLD}${SERVICE_NAME}${NC}"
+    echo -e "  Channel   : ${BOLD}${CHANNEL}${NC}"
+    echo -e "  Version   : ${BOLD}${VERSION}${NC}"
+    echo -e "  Public IP : ${BOLD}${SERVER_PUBLIC_IP}${NC}"
     echo -e "  Transport : ${BOLD}${TRANSPORT}${NC}"
     echo -e "  Port      : ${BOLD}${PORT}${NC}"
     echo -e "  PSK       : ${BOLD}${PSK}${NC}"
@@ -1712,10 +1866,14 @@ install_server() {
 
 install_client() {
     hr "Install Client"
-    ensure_binary
+    ensure_launcher client
+    check_ptrace_scope
     echo ""
 
     ask_service_name
+    echo ""
+
+    ask_version client
     echo ""
 
     ask_transport
@@ -1792,8 +1950,6 @@ install_client() {
             echo ""
             ask_required TUN_LOCAL_ADDR  "TUN local IP   (client side, any IP, e.g. 10.0.0.2)"
             ask_required TUN_REMOTE_ADDR "TUN remote IP  (server side, any IP, e.g. 10.0.0.1)"
-            # NOTE: bare IP, no /xx suffix -- see the matching comment in
-            # install_server, same reasoning applies here.
             TUN_LOCAL_ADDR="$(echo "$TUN_LOCAL_ADDR" | cut -d/ -f1)"
             TUN_REMOTE_ADDR="$(echo "$TUN_REMOTE_ADDR" | cut -d/ -f1)"
             echo ""
@@ -1843,6 +1999,8 @@ install_client() {
     echo -e "${GREEN}${BOLD}  Client installed successfully.${NC}"
     echo ""
     echo -e "  Service   : ${BOLD}${SERVICE_NAME}${NC}"
+    echo -e "  Channel   : ${BOLD}${CHANNEL}${NC}"
+    echo -e "  Version   : ${BOLD}${VERSION}${NC}"
     echo -e "  Transport : ${BOLD}${TRANSPORT}${NC}"
     echo -e "  Server    : ${BOLD}${SERVER_IP}:${SERVER_PORT}${NC}"
     echo -e "  PSK       : ${BOLD}${PSK}${NC}"
@@ -2121,7 +2279,7 @@ show_menu() {
     echo ""
     echo -e "  ${BOLD}Other${NC}"
     echo "    8)  Remove"
-    echo "    9)  Update Core (Binary)"
+    echo "    9)  Switch Release Channel  (release / beta + version)"
     echo "    0)  Exit"
     echo ""
     ask CHOICE "Choice" ""
@@ -2154,7 +2312,7 @@ while true; do
         6) run_action show_logs       ;;
         7) run_action show_logs_live  ;;
         8) run_action uninstall       ;;
-        9) run_action download_binary ;;
+        9) run_action switch_channel  ;;
         0) echo -e "\n  ${CYAN}Bye.${NC}\n"; exit 0 ;;
         *) warn "Invalid choice: ${CHOICE}" ;;
     esac
