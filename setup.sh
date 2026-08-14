@@ -111,37 +111,21 @@ ask_service_name() {
     info "Config File  : ${CONFIG}"
 }
 
-detect_server_public_ip() {
-    if [ -n "$DC_SERVER_PUBLIC_IP" ]; then
-        echo "$DC_SERVER_PUBLIC_IP"
-        return 0
-    fi
-
-    local ip svc
-    for svc in "https://api.ipify.org" "https://ifconfig.me/ip" "https://icanhazip.com"; do
-        ip=$(curl -fsSL --connect-timeout 5 --max-time 8 "$svc" 2>/dev/null | tr -d '[:space:]')
-        if echo "$ip" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
-            echo "$ip"
-            return 0
-        fi
-    done
-
-    ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
-    if [ -n "$ip" ]; then
-        echo "$ip"
-        return 0
-    fi
-
-    return 1
-}
-
+# Server mode's listener always binds "0.0.0.0:PORT" (see write_server_config_*),
+# which is never usable as the machine's own identity -- the launcher needs
+# this server's real public IP to match against the license record (see
+# resolveServerIP's doc comment in launcher.go), and has no other way to
+# get it. Without this, every server install would fail at startup with
+# "could not determine server_ip". Sets SERVER_PUBLIC_IP.
 ask_server_public_ip() {
     echo ""
-    SERVER_PUBLIC_IP=$(detect_server_public_ip)
-    if [ -z "$SERVER_PUBLIC_IP" ]; then
-        error "Could not auto-detect this server's public IP (no route to the detection services, and no default route found). Set it manually and re-run: DC_SERVER_PUBLIC_IP=<your public IP> bash setup.sh"
-    fi
-    info "Public IP : ${SERVER_PUBLIC_IP}  (auto-detected)"
+    local detected
+    detected=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
+    echo -e "  ${DIM}The launcher needs this server's public IP to match it against your${NC}"
+    echo -e "  ${DIM}license record on the license server. If this machine is behind NAT${NC}"
+    echo -e "  ${DIM}or has multiple interfaces, correct it to the real public IP.${NC}"
+    ask SERVER_PUBLIC_IP "This server's public IP" "$detected"
+    info "Public IP : ${SERVER_PUBLIC_IP}"
 }
 
 ask_transport() {
@@ -291,6 +275,21 @@ ask_ssl_client() {
     done
 }
 
+# DaggerLauncher is a small, unprotected program (see DaggerLauncher's own
+# source/docs) -- it fetches the real, protected binary from your license
+# server at every start (per the chosen release channel, see ask_channel)
+# and runs it straight from memory. ensure_launcher (below) downloads it
+# automatically from the role-appropriate domain if it isn't already
+# present at $LAUNCHER; if you've already placed a binary there yourself
+# (your own release channel, scp, whatever), this leaves it alone.
+# A separate anti-tampering measure the binary/launcher can't set for
+# itself (it's a kernel-wide sysctl, not a per-process attribute): with the
+# default ptrace_scope=0, ANY process running as the same user can attach a
+# debugger to DaggerConnect/DaggerLauncher, which -- combined with root SSH
+# access most operators already have -- makes this the easiest remaining
+# path to a live memory dump. Only warns; deliberately does not change a
+# system-wide kernel security setting on the operator's behalf without
+# being asked.
 check_ptrace_scope() {
     local f=/proc/sys/kernel/yama/ptrace_scope
     [ -r "$f" ] || return 0
@@ -304,6 +303,18 @@ check_ptrace_scope() {
     fi
 }
 
+# Downloads DaggerLauncher from the role-specific host if it's not already
+# present at $LAUNCHER -- server role fetches from ir.daggerconnect.site
+# (the same mirror DaggerLauncher itself talks to for server-role license
+# checks, see serverLicenseBaseURL in launcher.go), client role fetches
+# from daggerconnect.site (matches licenseBaseURL). This file is
+# deliberately unencrypted/unauthenticated over the wire (plain HTTPS GET,
+# no license-gated envelope) -- it has to be, since nothing else on a
+# fresh machine can verify anything yet; DaggerLauncher's own job starting
+# on its very first run is to go do a REAL license check before it ever
+# fetches or executes the actual protected binary. If a launcher already
+# exists at $LAUNCHER, it's left alone (chmod +x only) -- this never
+# silently overwrites an operator-placed binary with a fresh download.
 ensure_launcher() {
     local role="$1"
     if [ -f "$LAUNCHER" ]; then
@@ -311,63 +322,87 @@ ensure_launcher() {
         return 0
     fi
 
-    local github_url="https://github.com/itsFLoKi/daggerConnect/releases/download/v1/DaggerLauncher"
+    local url
+    case "$role" in
+        server) url="https://ir.daggerconnect.site/DaggerLauncher" ;;
+        client) url="https://daggerconnect.site/DaggerLauncher" ;;
+        *) error "ensure_launcher called with unknown role '$role' (expected server|client) -- this is an installer bug, not something you did wrong." ;;
+    esac
 
-    info "Downloading DaggerLauncher..."
-    if ! curl -fsSL --connect-timeout 10 --max-time 60 -o "$LAUNCHER" "$github_url"; then
-        error "Failed to download DaggerLauncher -- check network/DNS, or place the binary at ${LAUNCHER} yourself (chmod +x) and re-run."
+    info "Downloading DaggerLauncher (${role} channel: ${url})..."
+    if ! curl -fsSL --connect-timeout 10 --max-time 60 -o "$LAUNCHER" "$url"; then
+        error "Failed to download DaggerLauncher from ${url} -- check network/DNS, or place the binary at ${LAUNCHER} yourself (chmod +x) and re-run."
     fi
     chmod +x "$LAUNCHER"
     ok "DaggerLauncher downloaded"
 }
 
+# Fetches the live list of available (channel, version) combinations from
+# the role-appropriate license server and lets the operator pick one by
+# number -- e.g.:
+#   1)  v3.5.1  (release)
+#   2)  v3.5.0  (release)
+#   3)  v3.6.0  (beta)
+#   ...
+# instead of needing to already know what's been released and type a
+# version string from memory. Sets CHANNEL and VERSION, same as the old
+# purely-manual flow did, so every downstream caller (install_service,
+# update_binary) keeps working unchanged either way.
 ask_version() {
     local role="$1"
-    local url="https://api.github.com/repos/itsFLoKi/daggerConnect/releases"
 
-    echo ""
-    info "Fetching available versions..."
-    local json
-    json=$(curl -fsSL --connect-timeout 10 --max-time 20 -H "Accept: application/vnd.github+json" "$url" 2>/dev/null)
-
-    local labels=() chans=() vers=()
-    if [ -n "$json" ]; then
-        local tags prereleases drafts
-        tags=$(echo "$json" | grep -oP '"tag_name"\s*:\s*"\K[^"]+')
-        prereleases=$(echo "$json" | grep -oP '"prerelease"\s*:\s*\K(true|false)')
-        drafts=$(echo "$json" | grep -oP '"draft"\s*:\s*\K(true|false)')
-
-        mapfile -t tag_arr <<< "$tags"
-        mapfile -t pre_arr <<< "$prereleases"
-        mapfile -t draft_arr <<< "$drafts"
-
-        local n="${#tag_arr[@]}"
-        local i t p d
-        for ((i = 0; i < n; i++)); do
-            t="${tag_arr[$i]}"
-            p="${pre_arr[$i]:-false}"
-            d="${draft_arr[$i]:-false}"
-            [ -z "$t" ] && continue
-            [ "$d" = "true" ] && continue
-            if [ "$p" = "true" ]; then
-                labels+=("${t}  (beta)")
-                chans+=("beta")
-            else
-                labels+=("${t}  (release)")
-                chans+=("release")
-            fi
-            vers+=("$t")
-        done
-    fi
-
-    if [ "${#labels[@]}" -eq 0 ]; then
-        warn "Could not fetch a version list (offline install? DNS issue?) -- falling back to manual entry."
+    if [ ! -x "$LAUNCHER" ]; then
+        warn "DaggerLauncher not found at ${LAUNCHER} -- cannot fetch Binary versions through Launcher."
         ask_channel_manual
         return
     fi
 
     echo ""
-    echo -e "  ${BOLD}Available versions:${NC}"
+    info "Fetching available Binary versions from DaggerLauncher..."
+
+    local json
+    if ! json=$("$LAUNCHER" --list-versions --role "$role" 2>/tmp/daggerlauncher_versions.err); then
+        local err_msg
+        err_msg=$(cat /tmp/daggerlauncher_versions.err 2>/dev/null)
+        rm -f /tmp/daggerlauncher_versions.err
+        warn "DaggerLauncher could not fetch the Binary version list."
+        [ -n "$err_msg" ] && warn "$err_msg"
+        ask_channel_manual
+        return
+    fi
+    rm -f /tmp/daggerlauncher_versions.err
+
+    local labels=() chans=() vers=()
+    if [ -n "$json" ]; then
+        local release_list beta_list v
+        release_list=$(echo "$json" | grep -oP '"release"\s*:\s*\[\K[^]]*' 2>/dev/null)
+        beta_list=$(echo "$json"    | grep -oP '"beta"\s*:\s*\[\K[^]]*' 2>/dev/null)
+
+        while IFS= read -r v; do
+            [ -n "$v" ] && {
+                labels+=("${v}  (release)")
+                chans+=("release")
+                vers+=("$v")
+            }
+        done < <(echo "$release_list" | grep -oP '"[^"]+"' 2>/dev/null | tr -d '"')
+
+        while IFS= read -r v; do
+            [ -n "$v" ] && {
+                labels+=("${v}  (beta)")
+                chans+=("beta")
+                vers+=("$v")
+            }
+        done < <(echo "$beta_list" | grep -oP '"[^"]+"' 2>/dev/null | tr -d '"')
+    fi
+
+    if [ "${#labels[@]}" -eq 0 ]; then
+        warn "DaggerLauncher returned no Binary versions for role '${role}'."
+        ask_channel_manual
+        return
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Available Binary versions:${NC}"
     local i=1
     for label in "${labels[@]}"; do
         echo "    ${i})  ${label}"
@@ -376,8 +411,10 @@ ask_version() {
     echo ""
 
     while true; do
-        ask VER_CHOICE "Pick a version" "1"
-        if echo "$VER_CHOICE" | grep -qE '^[0-9]+$' && [ "$VER_CHOICE" -ge 1 ] 2>/dev/null && [ "$VER_CHOICE" -le "${#labels[@]}" ] 2>/dev/null; then
+        ask VER_CHOICE "Pick a Binary version" "1"
+        if echo "$VER_CHOICE" | grep -qE '^[0-9]+$' && \
+           [ "$VER_CHOICE" -ge 1 ] 2>/dev/null && \
+           [ "$VER_CHOICE" -le "${#labels[@]}" ] 2>/dev/null; then
             local idx=$((VER_CHOICE - 1))
             CHANNEL="${chans[$idx]}"
             VERSION="${vers[$idx]}"
@@ -385,7 +422,8 @@ ask_version() {
         fi
         warn "Please enter a number between 1 and ${#labels[@]}."
     done
-    info "Selected : ${VERSION} (${CHANNEL})"
+
+    info "Selected Binary: ${VERSION} (${CHANNEL})"
 }
 
 ask_channel_manual() {
@@ -422,10 +460,15 @@ ask_channel_manual() {
     info "Version : ${VERSION}"
 }
 
-switch_channel() {
-    hr "Switch Release Channel / Version"
+# Changes an already-installed service's release channel/version by editing
+# the Environment=DC_CHANNEL=/DC_VERSION= lines in its systemd unit (see
+# install_service), then restarts it so the launcher's next binary fetch
+# uses the new combination. Reverts automatically if the service fails to
+# come up.
+update_binary() {
+    hr "Update Binary / Version"
     echo ""
-    pick_service "Switch channel for" || return 0
+    pick_service "Update binary for" || return 0
     local svc="${PICKED_SVC%.service}"
     local svc_file="/etc/systemd/system/${PICKED_SVC}"
 
@@ -439,6 +482,11 @@ switch_channel() {
     echo ""
     info "Current: channel=${cur_channel} version=${cur_version}"
 
+    # ask_version needs to know which domain to query (server role ->
+    # ir.daggerconnect.site, client role -> daggerconnect.site) --
+    # detected from this service's own config file rather than asked
+    # again, since it was already chosen once at install time and never
+    # changes for an existing service.
     local svc_role=""
     for cfg_candidate in "${CONFIG_DIR}/${svc}.json" "${CONFIG_DIR}/${svc}.yaml"; do
         [ -f "$cfg_candidate" ] || continue
@@ -515,6 +563,8 @@ ask_ports() {
         for _p in "${_parts[@]}"; do
             _p="${_p// /}"
             [ -z "$_p" ] && continue
+            # An inline /udp, /tcp or /both suffix (if the user already
+            # knows the shorthand) always wins over the prompt above.
             if [[ "$_p" == */* ]]; then
                 PORTS+=("$_p")
             else
@@ -528,6 +578,9 @@ ask_ports() {
     fi
 }
 
+# parse_port_entry splits one port spec ("2222=22/udp", "8000", "51820/udp",
+# "7777/both") into "type|bind|target". Defaults: target=bind when no "=",
+# type=tcp when no recognized suffix.
 parse_port_entry() {
     local entry="$1" ptype="tcp" pbind ptarget
     if [[ "$entry" == */* ]]; then
@@ -565,6 +618,11 @@ build_ports_json() {
 }
 
 build_ports_yaml() {
+    # Same 6-space rule as before (see the FIX note this used to carry):
+    # every caller places the "maps:" key itself at 4-space indent (nested
+    # under a listener list item), so the "- type:" line needs 6 spaces to
+    # actually nest under it, and its sibling keys (bind/target) need 8 to
+    # nest under the list item itself.
     local p ptype pbind ptarget
     for p in "$@"; do
         IFS='|' read -r ptype pbind ptarget <<< "$(parse_port_entry "$p")"
@@ -578,6 +636,12 @@ build_ports_yaml() {
 SOCKS5_ENABLED="false"
 SOCKS5_BIND=""
 
+# ── client-side connection pool (redundant parallel connections per path) ──
+# Not offered for tun: a TUN link is a single point-to-point interface, so
+# multiple simultaneous sessions would just fight over the same interface
+# name and internal IP pair. Every other transport benefits from this: if
+# one connection drops (common on unstable links), the others keep traffic
+# flowing while it reconnects, instead of the whole tunnel going down.
 CLIENT_CONN_POOL="8"
 
 ask_connection_pool() {
@@ -1711,9 +1775,7 @@ install_server() {
     ask_service_name
     echo ""
 
-    CHANNEL="release"
-    VERSION="latest"
-    info "Version : ${VERSION} (${CHANNEL})"
+    ask_version server
     echo ""
 
     ask_server_public_ip
@@ -1785,6 +1847,11 @@ install_server() {
             echo ""
             ask_required TUN_LOCAL_ADDR  "TUN local IP   (server side, any IP, e.g. 10.0.0.1)"
             ask_required TUN_REMOTE_ADDR "TUN remote IP  (client side, any IP, e.g. 10.0.0.2)"
+            # NOTE: entered as a bare IP, no /xx suffix needed or wanted --
+            # tunIfaceCreate() strips any suffix you give it anyway and
+            # always configures the interface as /32 point-to-point
+            # internally, so writing "10.0.0.1/24" here would be actively
+            # misleading (it's never actually used as a /24).
             TUN_LOCAL_ADDR="$(echo "$TUN_LOCAL_ADDR" | cut -d/ -f1)"
             TUN_REMOTE_ADDR="$(echo "$TUN_REMOTE_ADDR" | cut -d/ -f1)"
             echo ""
@@ -1897,9 +1964,7 @@ install_client() {
     ask_service_name
     echo ""
 
-    CHANNEL="release"
-    VERSION="latest"
-    info "Version : ${VERSION} (${CHANNEL})"
+    ask_version client
     echo ""
 
     ask_transport
@@ -1976,6 +2041,8 @@ install_client() {
             echo ""
             ask_required TUN_LOCAL_ADDR  "TUN local IP   (client side, any IP, e.g. 10.0.0.2)"
             ask_required TUN_REMOTE_ADDR "TUN remote IP  (server side, any IP, e.g. 10.0.0.1)"
+            # NOTE: bare IP, no /xx suffix -- see the matching comment in
+            # install_server, same reasoning applies here.
             TUN_LOCAL_ADDR="$(echo "$TUN_LOCAL_ADDR" | cut -d/ -f1)"
             TUN_REMOTE_ADDR="$(echo "$TUN_REMOTE_ADDR" | cut -d/ -f1)"
             echo ""
@@ -2305,7 +2372,7 @@ show_menu() {
     echo ""
     echo -e "  ${BOLD}Other${NC}"
     echo "    8)  Remove"
-    echo "    9)  Switch Release Channel  (release / beta + version)"
+    echo "    9)  Update Binary  (release / beta + version)"
     echo "    0)  Exit"
     echo ""
     ask CHOICE "Choice" ""
@@ -2338,7 +2405,7 @@ while true; do
         6) run_action show_logs       ;;
         7) run_action show_logs_live  ;;
         8) run_action uninstall       ;;
-        9) run_action switch_channel  ;;
+        9) run_action update_binary   ;;
         0) echo -e "\n  ${CYAN}Bye.${NC}\n"; exit 0 ;;
         *) warn "Invalid choice: ${CHOICE}" ;;
     esac
