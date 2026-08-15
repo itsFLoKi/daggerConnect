@@ -110,12 +110,6 @@ ask_service_name() {
     info "Config File  : ${CONFIG}"
 }
 
-# این تابع عمداً کاملاً دستیه -- نسخه‌ی قبلی این IP رو خودکار تشخیص
-# می‌داد (از سرویس‌های بیرونی مثل ipify، یا از جدول روتینگ محلی)، ولی
-# رو سرورهایی که چند IP عمومی دارن، این تشخیص خودکار می‌تونست IP
-# اشتباهی رو انتخاب کنه -- نه لزوماً همونی که این تانل مشخص باید ازش
-# استفاده کنه. برگردوندن به ورودی دستی یعنی اپراتور همیشه دقیقاً
-# می‌دونه کدوم IP داره تنظیم می‌شه.
 ask_server_public_ip() {
     echo ""
     while true; do
@@ -166,14 +160,6 @@ generate_selfsigned_cert() {
     fi
 
     info "Generating a self-signed certificate for IP: ${ip} (no domain needed)..."
-    # -addext puts the IP in the certificate's Subject Alternative Name --
-    # this is what TLS clients actually check against when connecting by
-    # IP (a CN-only cert is not enough for modern TLS stacks to accept a
-    # bare-IP connection as matching). 3650 days = effectively permanent
-    # for a self-signed cert nobody's going to publicly trust anyway --
-    # what actually secures this transport is the PSK-derived encryption
-    # underneath, same as every other transport; this cert's only job is
-    # to make the wire traffic look like ordinary HTTPS.
     if ! openssl req -x509 -nodes -newkey rsa:2048 \
         -keyout "${cert_dir}/privkey.pem" \
         -out "${cert_dir}/fullchain.pem" \
