@@ -447,8 +447,8 @@ ask_version() {
     if [ -n "$json" ]; then
         local releases betas
 
-        releases=$(echo "$json" | grep -oP '"release"\s*:\s*\[\K[^\]]*' | grep -oP '"\K[^"]+')
-        betas=$(echo "$json" | grep -oP '"beta"\s*:\s*\[\K[^\]]*' | grep -oP '"\K[^"]+')
+        releases=$(echo "$json" | grep -oP '"release"\s*:\s*\[\K[^\]]*' | grep -oP '"[^"]*"' | tr -d '"')
+        betas=$(echo "$json" | grep -oP '"beta"\s*:\s*\[\K[^\]]*' | grep -oP '"[^"]*"' | tr -d '"')
 
         while IFS= read -r t; do
             [ -z "$t" ] && continue
