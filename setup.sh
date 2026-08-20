@@ -20,6 +20,7 @@ CHANNEL=""
 VERSION=""
 SERVER_PUBLIC_IP=""
 SSL_MODE=""
+DOMAIN=""
 CERT_FILE=""
 KEY_FILE=""
 
@@ -110,16 +111,48 @@ ask_service_name() {
     info "Config File  : ${CONFIG}"
 }
 
+detect_server_public_ip() {
+    if [ -n "$DC_SERVER_PUBLIC_IP" ]; then
+        echo "$DC_SERVER_PUBLIC_IP"
+        return 0
+    fi
+
+    local ip svc
+    for svc in "https://api.ipify.org" "https://ifconfig.me/ip" "https://icanhazip.com"; do
+        ip=$(curl -fsSL --connect-timeout 5 --max-time 8 "$svc" 2>/dev/null | tr -d '[:space:]')
+        if echo "$ip" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
+            echo "$ip"
+            return 0
+        fi
+    done
+
+    ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
+    if [ -n "$ip" ]; then
+        echo "$ip"
+        return 0
+    fi
+
+    return 1
+}
+
 ask_server_public_ip() {
     echo ""
+    SERVER_PUBLIC_IP=$(detect_server_public_ip)
+    if [ -z "$SERVER_PUBLIC_IP" ]; then
+        error "Could not auto-detect this server's public IP (no route to the detection services, and no default route found). Set it manually and re-run: DC_SERVER_PUBLIC_IP=<your public IP> bash setup.sh"
+    fi
+    info "Public IP : ${SERVER_PUBLIC_IP}  (auto-detected)"
+
+    local entered
     while true; do
-        ask SERVER_PUBLIC_IP "Server public IP" ""
-        if echo "$SERVER_PUBLIC_IP" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
+        ask entered "Press Enter to use this IP, or type a different public IP" "$SERVER_PUBLIC_IP"
+        if echo "$entered" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
+            SERVER_PUBLIC_IP="$entered"
             break
         fi
-        warn "Invalid IPv4 format. Enter this server's actual public IP (e.g. 203.0.113.10)."
+        warn "Invalid IPv4 address. Enter a valid IP (e.g. 91.199.19.132) or press Enter to keep ${SERVER_PUBLIC_IP}."
     done
-    info "Public IP : ${SERVER_PUBLIC_IP}"
+    info "Public IP : ${SERVER_PUBLIC_IP}  (using)"
 }
 
 ask_transport() {
@@ -130,8 +163,9 @@ ask_transport() {
     echo "    3)  wss     — WebSocket Secure (TLS) tunnel"
     echo "    4)  http    — HTTP Mimicry tunnel"
     echo "    5)  https   — HTTP Mimicry Secure (TLS) tunnel"
-    echo "    6)  quantum — Raw-packet tunnel (KCP over forged TCP; auto NIC/IP/gateway)"
-    echo "    7)  tun     — TUN kernel interface tunnel"
+    echo "    6)  quantum — Raw-packet tunnel"
+    echo "    7)  quantum+ — KCP over UDP"
+    echo "    8)  tun     — TUN kernel interface tunnel"
     echo ""
     while true; do
         ask T_CHOICE "Transport" "1"
@@ -142,50 +176,82 @@ ask_transport() {
             4|http)    TRANSPORT="http";    break ;;
             5|https)   TRANSPORT="https";   break ;;
             6|quantum) TRANSPORT="quantum"; break ;;
-            7|tun)     TRANSPORT="tun";     break ;;
-            *) warn "Please enter 1-7 or transport name." ;;
+            7|quantum+|quantumplus|qplus) TRANSPORT="quantum+"; break ;;
+            8|tun)     TRANSPORT="tun";     break ;;
+            *) warn "Please enter 1-8 or transport name." ;;
         esac
     done
     info "Transport : ${TRANSPORT}"
 }
 
-generate_selfsigned_cert() {
-    local ip="$1"
-    local cert_dir="/etc/DaggerConnect/certs/${SERVICE_NAME}"
-    mkdir -p "$cert_dir"
-    chmod 700 "$cert_dir"
+install_certbot() {
+    if command -v certbot &>/dev/null; then
+        ok "certbot already installed."
+        return
+    fi
+    info "Installing certbot..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq
+        apt-get install -y -qq certbot
+    elif command -v yum &>/dev/null; then
+        yum install -y -q certbot
+    elif command -v dnf &>/dev/null; then
+        dnf install -y -q certbot
+    else
+        error "Cannot install certbot — package manager not found. Install it manually."
+    fi
+    ok "certbot installed."
+}
 
-    if ! command -v openssl &>/dev/null; then
-        error "openssl not found. Install it (apt-get install -y openssl / yum install -y openssl) and re-run."
+obtain_cert_auto() {
+    local domain="$1"
+    local cert_dir="/etc/letsencrypt/live/${domain}"
+
+    install_certbot
+
+    if ss -tlnp 2>/dev/null | grep -q ':80 '; then
+        warn "Port 80 is in use. Trying --webroot or stopping may be needed."
+        warn "Attempting standalone anyway (will fail if 80 is busy)."
     fi
 
-    info "Generating a self-signed certificate for IP: ${ip} (no domain needed)..."
-    if ! openssl req -x509 -nodes -newkey rsa:2048 \
-        -keyout "${cert_dir}/privkey.pem" \
-        -out "${cert_dir}/fullchain.pem" \
-        -days 3650 \
-        -subj "/CN=${ip}" \
-        -addext "subjectAltName=IP:${ip}" \
-        > /dev/null 2>&1; then
-        error "openssl failed to generate the certificate. Run manually to see the real error: openssl req -x509 -nodes -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -subj '/CN=${ip}' -addext 'subjectAltName=IP:${ip}'"
+    info "Obtaining SSL certificate for: ${domain}"
+    if certbot certonly \
+        --standalone \
+        --non-interactive \
+        --agree-tos \
+        --register-unsafely-without-email \
+        -d "$domain" \
+        --http-01-port 80 2>&1 | grep -E "Congratulations|Certificate|error|Error|failed|Failed"; then
+        ok "Certificate obtained successfully."
+    else
+        error "certbot failed. Make sure port 80 is open and domain points to this server."
     fi
-
-    if [ ! -f "${cert_dir}/fullchain.pem" ] || [ ! -f "${cert_dir}/privkey.pem" ]; then
-        error "Certificate generation reported success but files are missing at ${cert_dir}"
-    fi
-    chmod 600 "${cert_dir}/privkey.pem"
 
     CERT_FILE="${cert_dir}/fullchain.pem"
     KEY_FILE="${cert_dir}/privkey.pem"
-    ok "Cert : ${CERT_FILE}  (self-signed, valid for IP ${ip})"
+
+    if [ ! -f "$CERT_FILE" ] || [ ! -f "$KEY_FILE" ]; then
+        error "Certificate files not found at ${cert_dir}"
+    fi
+
+    ok "Cert : ${CERT_FILE}"
     ok "Key  : ${KEY_FILE}"
+
+    local hook_dir="/etc/letsencrypt/renewal-hooks/deploy"
+    mkdir -p "$hook_dir"
+    cat > "${hook_dir}/daggerconnect-${SERVICE_NAME}.sh" << EOF
+#!/bin/bash
+systemctl restart ${SERVICE_NAME} 2>/dev/null || true
+EOF
+    chmod +x "${hook_dir}/daggerconnect-${SERVICE_NAME}.sh"
+    ok "Auto-renew hook installed."
 }
 
 ask_ssl_server() {
     echo ""
     echo -e "  ${BOLD}SSL Mode:${NC}"
-    echo "    1)  Automatic  — self-signed certificate for this server's IP (no domain needed)"
-    echo "    2)  Custom SSL — Provide your own cert/key paths"
+    echo "    1)  Automatic SSL  — Let's Encrypt (certbot)"
+    echo "    2)  Custom SSL     — Provide your own cert/key paths"
     echo ""
     while true; do
         ask SSL_CHOICE "SSL Mode" "1"
@@ -199,7 +265,9 @@ ask_ssl_server() {
     case "$SSL_MODE" in
         auto)
             echo ""
-            generate_selfsigned_cert "$SERVER_PUBLIC_IP"
+            ask_required DOMAIN "Domain name  (e.g. tunnel.example.com)"
+            echo ""
+            obtain_cert_auto "$DOMAIN"
             ;;
         custom)
             echo ""
@@ -247,6 +315,53 @@ check_ptrace_scope() {
         echo -e "  ${DIM}Recommended: sysctl -w kernel.yama.ptrace_scope=2   (or 3, which needs a reboot to undo)${NC}"
         echo -e "  ${DIM}Persist across reboots: echo 'kernel.yama.ptrace_scope=2' >> /etc/sysctl.d/99-daggerconnect.conf${NC}"
     fi
+}
+
+tune_network() {
+    hr "Network Tuning (fq + BBR, big buffers)"
+
+    local sysctl_file="/etc/sysctl.d/99-daggerconnect-net.conf"
+    step "Writing ${sysctl_file}"
+    cat > "$sysctl_file" << 'EOF'
+# DaggerConnect network tuning -- managed by setup.sh (safe to keep).
+net.core.rmem_max = 67108864
+net.core.wmem_max = 67108864
+net.core.rmem_default = 16777216
+net.core.wmem_default = 16777216
+net.core.optmem_max = 65536
+net.core.netdev_max_backlog = 250000
+net.core.somaxconn = 8192
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_rmem = 4096 131072 67108864
+net.ipv4.tcp_wmem = 4096 131072 67108864
+net.ipv4.udp_rmem_min = 131072
+net.ipv4.udp_wmem_min = 131072
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_slow_start_after_idle = 0
+EOF
+
+    modprobe tcp_bbr 2>/dev/null || true
+    if [ ! -f /etc/modules-load.d/daggerconnect-bbr.conf ]; then
+        echo "tcp_bbr" > /etc/modules-load.d/daggerconnect-bbr.conf 2>/dev/null || true
+    fi
+
+    step "Applying now (sysctl)"
+    if sysctl -p "$sysctl_file" >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1; then
+        ok "Applied and persisted (survives reboot)."
+    else
+        warn "Could not apply all sysctls now -- they will still take effect on next reboot."
+    fi
+
+    local cc qd
+    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    qd=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+    info "Congestion control: ${BOLD}${cc:-unknown}${NC}   qdisc: ${BOLD}${qd:-unknown}${NC}"
+    if [ "$cc" != "bbr" ]; then
+        warn "BBR not active (kernel may lack tcp_bbr). Throughput tuning still applied; consider a newer kernel for BBR."
+    fi
+    echo ""
 }
 
 ensure_launcher() {
@@ -335,7 +450,6 @@ ask_version() {
         releases=$(echo "$json" | grep -oP '"release"\s*:\s*\[\K[^\]]*' | grep -oP '"\K[^"]+')
         betas=$(echo "$json" | grep -oP '"beta"\s*:\s*\[\K[^\]]*' | grep -oP '"\K[^"]+')
 
-        # Release versions
         while IFS= read -r t; do
             [ -z "$t" ] && continue
             labels+=("${t}  (release)")
@@ -343,7 +457,6 @@ ask_version() {
             vers+=("$t")
         done <<< "$releases"
 
-        # Beta versions
         while IFS= read -r t; do
             [ -z "$t" ] && continue
             labels+=("${t}  (beta)")
@@ -618,6 +731,20 @@ ADV_TCP_WRITE_BUF="4194304"
 ADV_UDP_BUF="4194304"
 ADV_CHANNEL_BACKLOG="4096"
 ADV_STREAM_CHAN_BUF="512"
+ADV_KEEPALIVE_SEC="15"
+ADV_DEAD_TIMEOUT_SEC="60"
+
+ADV_HEALTH_PROBE_SEC="5"
+ADV_HEALTH_PROBE_TIMEOUT_MS="1500"
+ADV_HEALTH_MAX_MISSED="3"
+
+sync_legacy_keepalive() {
+    ADV_KEEPALIVE_SEC="$ADV_HEALTH_PROBE_SEC"
+    ADV_DEAD_TIMEOUT_SEC=$(( ADV_HEALTH_PROBE_SEC + (ADV_HEALTH_PROBE_TIMEOUT_MS * ADV_HEALTH_MAX_MISSED + 999) / 1000 ))
+    if [ "$ADV_DEAD_TIMEOUT_SEC" -lt $(( 3 * ADV_HEALTH_PROBE_SEC )) ]; then
+        ADV_DEAD_TIMEOUT_SEC=$(( 3 * ADV_HEALTH_PROBE_SEC ))
+    fi
+}
 
 apply_profile() {
     local p="$1"
@@ -629,7 +756,7 @@ apply_profile() {
             ADV_CHANNEL_BACKLOG="4096"   ADV_STREAM_CHAN_BUF="512"
             ADV_TCP_KEEPALIVE="1"        ADV_CONN_TIMEOUT="30"
             ADV_SESSION_TIMEOUT="60"     ADV_CLEANUP_INTERVAL="3"
-            ADV_KEEPALIVE_SEC="20"       ADV_DEAD_TIMEOUT_SEC="60"
+            ADV_HEALTH_PROBE_SEC="5"     ADV_HEALTH_PROBE_TIMEOUT_MS="1500"   ADV_HEALTH_MAX_MISSED="3"
             ;;
         aggressive)
             ADV_TCP_READ_BUF="16777216"  ADV_TCP_WRITE_BUF="16777216"
@@ -637,7 +764,7 @@ apply_profile() {
             ADV_CHANNEL_BACKLOG="8192"   ADV_STREAM_CHAN_BUF="2048"
             ADV_TCP_KEEPALIVE="1"        ADV_CONN_TIMEOUT="60"
             ADV_SESSION_TIMEOUT="120"    ADV_CLEANUP_INTERVAL="5"
-            ADV_KEEPALIVE_SEC="20"       ADV_DEAD_TIMEOUT_SEC="80"
+            ADV_HEALTH_PROBE_SEC="5"     ADV_HEALTH_PROBE_TIMEOUT_MS="2000"   ADV_HEALTH_MAX_MISSED="3"
             ;;
         low_latency)
             ADV_TCP_READ_BUF="2097152"   ADV_TCP_WRITE_BUF="2097152"
@@ -645,7 +772,7 @@ apply_profile() {
             ADV_CHANNEL_BACKLOG="2048"   ADV_STREAM_CHAN_BUF="256"
             ADV_TCP_KEEPALIVE="1"        ADV_CONN_TIMEOUT="15"
             ADV_SESSION_TIMEOUT="30"     ADV_CLEANUP_INTERVAL="2"
-            ADV_KEEPALIVE_SEC="10"       ADV_DEAD_TIMEOUT_SEC="30"
+            ADV_HEALTH_PROBE_SEC="3"     ADV_HEALTH_PROBE_TIMEOUT_MS="800"    ADV_HEALTH_MAX_MISSED="3"
             ;;
         low_hardware)
             ADV_TCP_READ_BUF="524288"    ADV_TCP_WRITE_BUF="524288"
@@ -653,9 +780,10 @@ apply_profile() {
             ADV_CHANNEL_BACKLOG="512"    ADV_STREAM_CHAN_BUF="128"
             ADV_TCP_KEEPALIVE="5"        ADV_CONN_TIMEOUT="20"
             ADV_SESSION_TIMEOUT="45"     ADV_CLEANUP_INTERVAL="3"
-            ADV_KEEPALIVE_SEC="30"       ADV_DEAD_TIMEOUT_SEC="90"
+            ADV_HEALTH_PROBE_SEC="8"     ADV_HEALTH_PROBE_TIMEOUT_MS="2500"   ADV_HEALTH_MAX_MISSED="3"
             ;;
     esac
+    sync_legacy_keepalive
 }
 
 ask_advanced() {
@@ -700,9 +828,15 @@ ask_advanced() {
             ask ADV_SESSION_TIMEOUT  "session_timeout     (sec)"    "60"
             ask ADV_CLEANUP_INTERVAL "cleanup_interval    (sec)"    "3"
             echo ""
-            echo -e "  ${BOLD}Heartbeat  (session-level keepalive, all transports except tun):${NC}"
-            ask ADV_KEEPALIVE_SEC    "keepalive_sec       (sec)"    "20"
-            ask ADV_DEAD_TIMEOUT_SEC "dead_timeout_sec    (sec)"    "60"
+            echo -e "  ${BOLD}Liveness  (unified tunnel health — ALL transports):${NC}"
+            echo -e "  ${DIM}Probe the peer every health_probe_sec on the real tunnel connection;${NC}"
+            echo -e "  ${DIM}a probe unanswered for health_probe_timeout_ms counts as one miss, and${NC}"
+            echo -e "  ${DIM}health_max_missed consecutive misses declare the tunnel dead. KCP-based${NC}"
+            echo -e "  ${DIM}transports (kcp/quantum/quantum+/tun) auto-widen the timeout for loss.${NC}"
+            ask ADV_HEALTH_PROBE_SEC        "health_probe_sec         (sec)"   "5"
+            ask ADV_HEALTH_PROBE_TIMEOUT_MS "health_probe_timeout_ms  (ms)"    "1500"
+            ask ADV_HEALTH_MAX_MISSED       "health_max_missed        (count)" "3"
+            sync_legacy_keepalive
             echo ""
             echo -e "  ${BOLD}Buffers  (bytes, e.g. 4194304 = 4MB):${NC}"
             ask ADV_TCP_READ_BUF     "tcp_read_buffer     (bytes)"  "4194304"
@@ -721,47 +855,6 @@ ask_advanced() {
     info "Tuner Profile : ${ADV_PROFILE}$([ "$ADV_AUTO_TUNE" = "true" ] && echo " (adaptive)" || echo " (fixed)")"
 }
 
-build_healthcheck_json_server() {
-    printf '  "health_check": {
-    "enabled": true,
-    "port": 5550,
-    "interval_sec": 5,
-    "timeout_ms": 5000,
-    "max_consecutive_fails": 5
-  },
-'
-}
-
-build_healthcheck_json_client() {
-    printf '  "health_check": {
-    "enabled": true,
-    "interval_sec": 5,
-    "timeout_ms": 5000,
-    "max_consecutive_fails": 5
-  },
-'
-}
-
-build_healthcheck_yaml_server() {
-    printf "health_check:
-  enabled: true
-  port: 5550
-  interval_sec: 5
-  timeout_ms: 5000
-  max_consecutive_fails: 5
-
-"
-}
-
-build_healthcheck_yaml_client() {
-    printf "health_check:
-  enabled: true
-  interval_sec: 5
-  timeout_ms: 5000
-  max_consecutive_fails: 5
-
-"
-}
 
 build_advanced_json() {
     printf '  "advanced": {
@@ -790,8 +883,14 @@ build_advanced_json() {
 '      "$ADV_STREAM_CHAN_BUF"
     printf '    "keepalive_sec": %s,
 '      "$ADV_KEEPALIVE_SEC"
-    printf '    "dead_timeout_sec": %s
+    printf '    "dead_timeout_sec": %s,
 '   "$ADV_DEAD_TIMEOUT_SEC"
+    printf '    "health_probe_sec": %s,
+'      "$ADV_HEALTH_PROBE_SEC"
+    printf '    "health_probe_timeout_ms": %s,
+'      "$ADV_HEALTH_PROBE_TIMEOUT_MS"
+    printf '    "health_max_missed": %s
+'      "$ADV_HEALTH_MAX_MISSED"
     printf '  }'
 }
 
@@ -840,6 +939,12 @@ build_advanced_yaml() {
 "     "$ADV_KEEPALIVE_SEC"
     printf "  dead_timeout_sec: %s
 "  "$ADV_DEAD_TIMEOUT_SEC"
+    printf "  health_probe_sec: %s
+"     "$ADV_HEALTH_PROBE_SEC"
+    printf "  health_probe_timeout_ms: %s
+"     "$ADV_HEALTH_PROBE_TIMEOUT_MS"
+    printf "  health_max_missed: %s
+"     "$ADV_HEALTH_MAX_MISSED"
 }
 
 write_server_config_tcp() {
@@ -864,7 +969,7 @@ write_server_config_tcp() {
       ]
     }
   ],
-' "$psk" "$port" "$ports_json"; build_healthcheck_json_server; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$ports_json"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: tcp
@@ -875,7 +980,7 @@ listeners:
     transport: tcp
     maps:
 %s
-' "$psk" "$port" "$ports_yaml"; build_healthcheck_yaml_server; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$ports_yaml"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -897,7 +1002,7 @@ write_client_config_tcp() {
       "dial_timeout": 10
     }
   ],
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_healthcheck_json_client; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: tcp
@@ -910,7 +1015,7 @@ paths:
     retry_interval: 3
     dial_timeout: 10
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_healthcheck_yaml_client; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -939,7 +1044,7 @@ write_server_config_ws() {
   "ws_settings": {
     "path": "%s"
   },
-' "$psk" "$port" "$ports_json" "$ws_path"; build_healthcheck_json_server; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$ports_json" "$ws_path"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: ws
@@ -953,7 +1058,7 @@ listeners:
 ws_settings:
   path: "%s"
 
-' "$psk" "$port" "$ports_yaml" "$ws_path"; build_healthcheck_yaml_server; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$ports_yaml" "$ws_path"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -978,7 +1083,7 @@ write_client_config_ws() {
   "ws_settings": {
     "path": "%s"
   },
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_healthcheck_json_client; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: ws
@@ -994,7 +1099,7 @@ paths:
 ws_settings:
   path: "%s"
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_healthcheck_yaml_client; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1025,7 +1130,7 @@ write_server_config_wss() {
   "ws_settings": {
     "path": "%s"
   },
-' "$psk" "$port" "$cert" "$key" "$ports_json" "$ws_path"; build_healthcheck_json_server; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$cert" "$key" "$ports_json" "$ws_path"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: wss
@@ -1041,7 +1146,7 @@ listeners:
 ws_settings:
   path: "%s"
 
-' "$psk" "$port" "$cert" "$key" "$ports_yaml" "$ws_path"; build_healthcheck_yaml_server; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$cert" "$key" "$ports_yaml" "$ws_path"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1067,7 +1172,7 @@ write_client_config_wss() {
     "path": "%s"
   },
   "tls_insecure": %s,
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path" "$tls_insecure"; build_healthcheck_json_client; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path" "$tls_insecure"; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: wss
@@ -1085,7 +1190,7 @@ ws_settings:
 
 tls_insecure: %s
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path" "$tls_insecure"; build_healthcheck_yaml_client; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path" "$tls_insecure"; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1115,7 +1220,7 @@ write_server_config_http() {
     "fake_domain": "%s",
     "path": "%s"
   },
-' "$psk" "$port" "$ports_json" "$http_domain" "$http_path"; build_healthcheck_json_server; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$ports_json" "$http_domain" "$http_path"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: http
@@ -1130,7 +1235,7 @@ http_settings:
   fake_domain: "%s"
   path: "%s"
 
-' "$psk" "$port" "$ports_yaml" "$http_domain" "$http_path"; build_healthcheck_yaml_server; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$ports_yaml" "$http_domain" "$http_path"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1162,7 +1267,7 @@ write_server_config_https() {
     "fake_domain": "%s",
     "path": "%s"
   },
-' "$psk" "$port" "$cert" "$key" "$ports_json" "$http_domain" "$http_path"; build_healthcheck_json_server; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$cert" "$key" "$ports_json" "$http_domain" "$http_path"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: https
@@ -1179,7 +1284,7 @@ http_settings:
   fake_domain: "%s"
   path: "%s"
 
-' "$psk" "$port" "$cert" "$key" "$ports_yaml" "$http_domain" "$http_path"; build_healthcheck_yaml_server; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$cert" "$key" "$ports_yaml" "$http_domain" "$http_path"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1206,7 +1311,7 @@ write_client_config_https() {
     "path": "%s"
   },
   "tls_insecure": %s,
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path" "$tls_insecure"; build_healthcheck_json_client; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path" "$tls_insecure"; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: https
@@ -1225,7 +1330,7 @@ http_settings:
 
 tls_insecure: %s
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path" "$tls_insecure"; build_healthcheck_yaml_client; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path" "$tls_insecure"; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1255,7 +1360,7 @@ write_server_config_quantum() {
     "mtu": %s,
     "block": "%s"
   },
-' "$psk" "$port" "$ports_json" "$mtu" "$block"; build_healthcheck_json_server; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$ports_json" "$mtu" "$block"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: quantum
@@ -1270,7 +1375,7 @@ quantum:
   mtu: %s
   block: "%s"
 
-' "$psk" "$port" "$ports_yaml" "$mtu" "$block"; build_healthcheck_yaml_server; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$ports_yaml" "$mtu" "$block"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1296,7 +1401,7 @@ write_client_config_quantum() {
     "mtu": %s,
     "block": "%s"
   },
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$mtu" "$block"; build_healthcheck_json_client; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$mtu" "$block"; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: quantum
@@ -1313,7 +1418,79 @@ quantum:
   mtu: %s
   block: "%s"
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$mtu" "$block"; build_healthcheck_yaml_client; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$mtu" "$block"; build_advanced_yaml; } > "$CONFIG"
+    fi
+}
+
+write_server_config_quantumplus() {
+    local port="$1" psk="$2"
+    shift 2
+    local ports_json ports_yaml
+    ports_json=$(build_ports_json "$@")
+    ports_yaml=$(build_ports_yaml "$@")
+    mkdir -p "$CONFIG_DIR"
+    if [ "$CONFIG_FMT" = "json" ]; then
+        {         printf '{
+  "mode": "server",
+  "transport": "quantum+",
+  "psk": "%s",
+  "log_level": "info",
+  "listeners": [
+    {
+      "addr": "0.0.0.0:%s",
+      "transport": "quantum+",
+      "maps": [
+%s
+      ]
+    }
+  ],
+' "$psk" "$port" "$ports_json"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+    else
+        {         printf 'mode: server
+transport: "quantum+"
+psk: "%s"
+log_level: info
+listeners:
+  - addr: "0.0.0.0:%s"
+    transport: "quantum+"
+    maps:
+%s
+' "$psk" "$port" "$ports_yaml"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
+    fi
+}
+
+write_client_config_quantumplus() {
+    local server_ip="$1" server_port="$2" psk="$3"
+    mkdir -p "$CONFIG_DIR"
+    if [ "$CONFIG_FMT" = "json" ]; then
+        {         printf '{
+  "mode": "client",
+  "transport": "quantum+",
+  "psk": "%s",
+  "log_level": "info",
+  "paths": [
+    {
+      "transport": "quantum+",
+      "addr": "%s:%s",
+      "connection_pool": %s,
+      "retry_interval": 3,
+      "dial_timeout": 10
+    }
+  ],
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_advanced_json; printf '}\n'; } > "$CONFIG"
+    else
+        {         printf 'mode: client
+transport: "quantum+"
+psk: "%s"
+log_level: info
+paths:
+  - transport: "quantum+"
+    addr: "%s:%s"
+    connection_pool: %s
+    retry_interval: 3
+    dial_timeout: 10
+
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1339,7 +1516,7 @@ write_client_config_http() {
     "fake_domain": "%s",
     "path": "%s"
   },
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_healthcheck_json_client; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: http
@@ -1356,7 +1533,7 @@ http_settings:
   fake_domain: "%s"
   path: "%s"
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_healthcheck_yaml_client; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1708,6 +1885,7 @@ install_server() {
     hr "Install Server"
     ensure_launcher server
     check_ptrace_scope
+    tune_network
     echo ""
 
     ask_service_name
@@ -1794,7 +1972,7 @@ install_server() {
             ask TUN_NAME  "TUN device name" "dagger0"
             echo ""
             ask TUN_HEARTBEAT_SEC    "Heartbeat interval (sec)  -- lower = faster failure detection" "5"
-            ask TUN_IDLE_TIMEOUT_SEC "Idle timeout (sec)  -- how long with no traffic before reconnecting" "40"
+            ask TUN_IDLE_TIMEOUT_SEC "Idle timeout (sec)  -- how long with no traffic before reconnecting" "20"
             echo ""
             ask TUN_SPOOF_CHOICE "Enable IP Spoof (y/n)" "n"
             if [ "$TUN_SPOOF_CHOICE" = "y" ] || [ "$TUN_SPOOF_CHOICE" = "Y" ]; then
@@ -1831,6 +2009,7 @@ install_server() {
         http)    write_server_config_http    "$PORT" "$PSK" "$HTTP_DOMAIN" "$HTTP_PATH" "${PORTS[@]}" ;;
         https)   write_server_config_https   "$PORT" "$PSK" "$HTTP_DOMAIN" "$HTTP_PATH" "$CERT_FILE" "$KEY_FILE" "${PORTS[@]}" ;;
         quantum) write_server_config_quantum "$PORT" "$PSK" "$QM_MTU" "$QM_BLOCK" "${PORTS[@]}" ;;
+        quantum+) write_server_config_quantumplus "$PORT" "$PSK" "${PORTS[@]}" ;;
         tun)     write_server_config_tun     "$PORT" "$PSK" "$TUN_LOCAL_IP" "$TUN_PEER_IP" "$TUN_LOCAL_ADDR" "$TUN_REMOTE_ADDR" "$TUN_ENCAP" "$TUN_PROFILE" "$TUN_IFACE" "$TUN_SPOOF_SRC" "$TUN_SPOOF_DST" "$TUN_DCPI" "$TUN_NAME" "$TUN_HEARTBEAT_SEC" "$TUN_IDLE_TIMEOUT_SEC" "${PORTS[@]}" ;;
     esac
     ok "Config written: ${CONFIG}"
@@ -1852,6 +2031,7 @@ install_server() {
     if [ "$TRANSPORT" = "wss" ]; then
         echo -e "  WS Path   : ${BOLD}${WS_PATH}${NC}"
         echo -e "  SSL Mode  : ${BOLD}${SSL_MODE}${NC}"
+        [ "$SSL_MODE" = "auto" ] && echo -e "  Domain    : ${BOLD}${DOMAIN}${NC}"
         echo -e "  Cert      : ${BOLD}${CERT_FILE}${NC}"
         echo -e "  Key       : ${BOLD}${KEY_FILE}${NC}"
     fi
@@ -1863,6 +2043,7 @@ install_server() {
         echo -e "  Fake Domain : ${BOLD}${HTTP_DOMAIN}${NC}"
         echo -e "  Fake Path   : ${BOLD}${HTTP_PATH}${NC}"
         echo -e "  SSL Mode    : ${BOLD}${SSL_MODE}${NC}"
+        [ "$SSL_MODE" = "auto" ] && echo -e "  Domain      : ${BOLD}${DOMAIN}${NC}"
         echo -e "  Cert        : ${BOLD}${CERT_FILE}${NC}"
         echo -e "  Key         : ${BOLD}${KEY_FILE}${NC}"
     fi
@@ -1870,6 +2051,10 @@ install_server() {
         echo -e "  Interface : ${BOLD}auto-detect${NC}"
         echo -e "  MTU       : ${BOLD}${QM_MTU}${NC}"
         echo -e "  Block     : ${BOLD}${QM_BLOCK}${NC}"
+    fi
+    if [ "$TRANSPORT" = "quantum+" ]; then
+        echo -e "  Core      : ${BOLD}rawmux (dagMux, FEC 10/1)${NC}"
+        echo -e "  ${YELLOW}Open UDP ${PORT} AND UDP $((PORT + 10000)) (knock port) in your firewall.${NC}"
     fi
     if [ "$TRANSPORT" = "tun" ]; then
         echo -e "  Encap     : ${BOLD}${TUN_ENCAP}${NC}"
@@ -1892,6 +2077,7 @@ install_client() {
     hr "Install Client"
     ensure_launcher client
     check_ptrace_scope
+    tune_network
     echo ""
 
     ask_service_name
@@ -1983,7 +2169,7 @@ install_client() {
             ask TUN_NAME  "TUN device name" "dagger0"
             echo ""
             ask TUN_HEARTBEAT_SEC    "Heartbeat interval (sec)  -- doesn't need to match the server, but similar values make sense" "5"
-            ask TUN_IDLE_TIMEOUT_SEC "Idle timeout (sec)  -- how long with no traffic before reconnecting" "40"
+            ask TUN_IDLE_TIMEOUT_SEC "Idle timeout (sec)  -- how long with no traffic before reconnecting" "20"
             echo ""
             ask TUN_SPOOF_CHOICE "Enable IP Spoof (y/n)" "n"
             if [ "$TUN_SPOOF_CHOICE" = "y" ] || [ "$TUN_SPOOF_CHOICE" = "Y" ]; then
@@ -2014,6 +2200,7 @@ install_client() {
         http)    write_client_config_http    "$SERVER_IP" "$SERVER_PORT" "$PSK" "$HTTP_DOMAIN" "$HTTP_PATH" ;;
         https)   write_client_config_https   "$SERVER_IP" "$SERVER_PORT" "$PSK" "$HTTP_DOMAIN" "$HTTP_PATH" "$TLS_INSECURE" ;;
         quantum) write_client_config_quantum "$SERVER_IP" "$SERVER_PORT" "$PSK" "$QM_MTU" "$QM_BLOCK" ;;
+        quantum+) write_client_config_quantumplus "$SERVER_IP" "$SERVER_PORT" "$PSK" ;;
         tun)     write_client_config_tun     "$SERVER_PORT" "$PSK" "$TUN_LOCAL_IP" "$TUN_PEER_IP" "$TUN_LOCAL_ADDR" "$TUN_REMOTE_ADDR" "$TUN_ENCAP" "$TUN_PROFILE" "$TUN_IFACE" "$TUN_SPOOF_SRC" "$TUN_SPOOF_DST" "$TUN_DCPI" "$TUN_NAME" "$TUN_HEARTBEAT_SEC" "$TUN_IDLE_TIMEOUT_SEC" ;;
     esac
     ok "Config written: ${CONFIG}"
