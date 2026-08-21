@@ -142,17 +142,6 @@ ask_server_public_ip() {
         error "Could not auto-detect this server's public IP (no route to the detection services, and no default route found). Set it manually and re-run: DC_SERVER_PUBLIC_IP=<your public IP> bash setup.sh"
     fi
     info "Public IP : ${SERVER_PUBLIC_IP}  (auto-detected)"
-
-    local entered
-    while true; do
-        ask entered "Press Enter to use this IP, or type a different public IP" "$SERVER_PUBLIC_IP"
-        if echo "$entered" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
-            SERVER_PUBLIC_IP="$entered"
-            break
-        fi
-        warn "Invalid IPv4 address. Enter a valid IP (e.g. 91.199.19.132) or press Enter to keep ${SERVER_PUBLIC_IP}."
-    done
-    info "Public IP : ${SERVER_PUBLIC_IP}  (using)"
 }
 
 ask_transport() {
@@ -163,8 +152,8 @@ ask_transport() {
     echo "    3)  wss     — WebSocket Secure (TLS) tunnel"
     echo "    4)  http    — HTTP Mimicry tunnel"
     echo "    5)  https   — HTTP Mimicry Secure (TLS) tunnel"
-    echo "    6)  quantum — Raw-packet tunnel"
-    echo "    7)  quantum+ — KCP over UDP"
+    echo "    6)  quantum — Raw-packet tunnel (KCP over forged TCP; auto NIC/IP/gateway)"
+    echo "    7)  quantum+ — KCP over UDP (rawmux: dagMux core, FEC 10/1, UDP knock + fake-TCP; low overhead)"
     echo "    8)  tun     — TUN kernel interface tunnel"
     echo ""
     while true; do
@@ -317,6 +306,11 @@ check_ptrace_scope() {
     fi
 }
 
+# tune_network raises the kernel network limits that otherwise cap tunnel
+# throughput and switches to the fq+BBR pair for the best goodput AND lowest
+# latency. Applied immediately AND persisted across reboots. Idempotent and
+# best-effort -- safe to run on every install. Mirrors the binary's built-in
+# tuneHostNetwork() so bandwidth is high whether or not auto_tune is on.
 tune_network() {
     hr "Network Tuning (fq + BBR, big buffers)"
 
@@ -342,6 +336,7 @@ net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_slow_start_after_idle = 0
 EOF
 
+    # BBR needs the tcp_bbr module -- load now and persist so it survives reboot.
     modprobe tcp_bbr 2>/dev/null || true
     if [ ! -f /etc/modules-load.d/daggerconnect-bbr.conf ]; then
         echo "tcp_bbr" > /etc/modules-load.d/daggerconnect-bbr.conf 2>/dev/null || true
@@ -734,18 +729,6 @@ ADV_STREAM_CHAN_BUF="512"
 ADV_KEEPALIVE_SEC="15"
 ADV_DEAD_TIMEOUT_SEC="60"
 
-ADV_HEALTH_PROBE_SEC="5"
-ADV_HEALTH_PROBE_TIMEOUT_MS="1500"
-ADV_HEALTH_MAX_MISSED="3"
-
-sync_legacy_keepalive() {
-    ADV_KEEPALIVE_SEC="$ADV_HEALTH_PROBE_SEC"
-    ADV_DEAD_TIMEOUT_SEC=$(( ADV_HEALTH_PROBE_SEC + (ADV_HEALTH_PROBE_TIMEOUT_MS * ADV_HEALTH_MAX_MISSED + 999) / 1000 ))
-    if [ "$ADV_DEAD_TIMEOUT_SEC" -lt $(( 3 * ADV_HEALTH_PROBE_SEC )) ]; then
-        ADV_DEAD_TIMEOUT_SEC=$(( 3 * ADV_HEALTH_PROBE_SEC ))
-    fi
-}
-
 apply_profile() {
     local p="$1"
     ADV_PROFILE="$p"
@@ -756,7 +739,7 @@ apply_profile() {
             ADV_CHANNEL_BACKLOG="4096"   ADV_STREAM_CHAN_BUF="512"
             ADV_TCP_KEEPALIVE="1"        ADV_CONN_TIMEOUT="30"
             ADV_SESSION_TIMEOUT="60"     ADV_CLEANUP_INTERVAL="3"
-            ADV_HEALTH_PROBE_SEC="5"     ADV_HEALTH_PROBE_TIMEOUT_MS="1500"   ADV_HEALTH_MAX_MISSED="3"
+            ADV_KEEPALIVE_SEC="15"       ADV_DEAD_TIMEOUT_SEC="60"
             ;;
         aggressive)
             ADV_TCP_READ_BUF="16777216"  ADV_TCP_WRITE_BUF="16777216"
@@ -764,7 +747,7 @@ apply_profile() {
             ADV_CHANNEL_BACKLOG="8192"   ADV_STREAM_CHAN_BUF="2048"
             ADV_TCP_KEEPALIVE="1"        ADV_CONN_TIMEOUT="60"
             ADV_SESSION_TIMEOUT="120"    ADV_CLEANUP_INTERVAL="5"
-            ADV_HEALTH_PROBE_SEC="5"     ADV_HEALTH_PROBE_TIMEOUT_MS="2000"   ADV_HEALTH_MAX_MISSED="3"
+            ADV_KEEPALIVE_SEC="20"       ADV_DEAD_TIMEOUT_SEC="80"
             ;;
         low_latency)
             ADV_TCP_READ_BUF="2097152"   ADV_TCP_WRITE_BUF="2097152"
@@ -772,7 +755,7 @@ apply_profile() {
             ADV_CHANNEL_BACKLOG="2048"   ADV_STREAM_CHAN_BUF="256"
             ADV_TCP_KEEPALIVE="1"        ADV_CONN_TIMEOUT="15"
             ADV_SESSION_TIMEOUT="30"     ADV_CLEANUP_INTERVAL="2"
-            ADV_HEALTH_PROBE_SEC="3"     ADV_HEALTH_PROBE_TIMEOUT_MS="800"    ADV_HEALTH_MAX_MISSED="3"
+            ADV_KEEPALIVE_SEC="10"       ADV_DEAD_TIMEOUT_SEC="30"
             ;;
         low_hardware)
             ADV_TCP_READ_BUF="524288"    ADV_TCP_WRITE_BUF="524288"
@@ -780,10 +763,9 @@ apply_profile() {
             ADV_CHANNEL_BACKLOG="512"    ADV_STREAM_CHAN_BUF="128"
             ADV_TCP_KEEPALIVE="5"        ADV_CONN_TIMEOUT="20"
             ADV_SESSION_TIMEOUT="45"     ADV_CLEANUP_INTERVAL="3"
-            ADV_HEALTH_PROBE_SEC="8"     ADV_HEALTH_PROBE_TIMEOUT_MS="2500"   ADV_HEALTH_MAX_MISSED="3"
+            ADV_KEEPALIVE_SEC="30"       ADV_DEAD_TIMEOUT_SEC="90"
             ;;
     esac
-    sync_legacy_keepalive
 }
 
 ask_advanced() {
@@ -828,15 +810,12 @@ ask_advanced() {
             ask ADV_SESSION_TIMEOUT  "session_timeout     (sec)"    "60"
             ask ADV_CLEANUP_INTERVAL "cleanup_interval    (sec)"    "3"
             echo ""
-            echo -e "  ${BOLD}Liveness  (unified tunnel health — ALL transports):${NC}"
-            echo -e "  ${DIM}Probe the peer every health_probe_sec on the real tunnel connection;${NC}"
-            echo -e "  ${DIM}a probe unanswered for health_probe_timeout_ms counts as one miss, and${NC}"
-            echo -e "  ${DIM}health_max_missed consecutive misses declare the tunnel dead. KCP-based${NC}"
-            echo -e "  ${DIM}transports (kcp/quantum/quantum+/tun) auto-widen the timeout for loss.${NC}"
-            ask ADV_HEALTH_PROBE_SEC        "health_probe_sec         (sec)"   "5"
-            ask ADV_HEALTH_PROBE_TIMEOUT_MS "health_probe_timeout_ms  (ms)"    "1500"
-            ask ADV_HEALTH_MAX_MISSED       "health_max_missed        (count)" "3"
-            sync_legacy_keepalive
+            echo -e "  ${BOLD}Heartbeat  (in-band session keepalive, all transports except tun):${NC}"
+            echo -e "  ${DIM}Ping every keepalive_sec; tunnel is declared dead only after${NC}"
+            echo -e "  ${DIM}dead_timeout_sec with zero inbound frames. Keep dead_timeout_sec${NC}"
+            echo -e "  ${DIM}at least ~3x keepalive_sec so lost pings don't cause a false drop.${NC}"
+            ask ADV_KEEPALIVE_SEC    "keepalive_sec       (sec)"    "15"
+            ask ADV_DEAD_TIMEOUT_SEC "dead_timeout_sec    (sec)"    "60"
             echo ""
             echo -e "  ${BOLD}Buffers  (bytes, e.g. 4194304 = 4MB):${NC}"
             ask ADV_TCP_READ_BUF     "tcp_read_buffer     (bytes)"  "4194304"
@@ -883,14 +862,8 @@ build_advanced_json() {
 '      "$ADV_STREAM_CHAN_BUF"
     printf '    "keepalive_sec": %s,
 '      "$ADV_KEEPALIVE_SEC"
-    printf '    "dead_timeout_sec": %s,
+    printf '    "dead_timeout_sec": %s
 '   "$ADV_DEAD_TIMEOUT_SEC"
-    printf '    "health_probe_sec": %s,
-'      "$ADV_HEALTH_PROBE_SEC"
-    printf '    "health_probe_timeout_ms": %s,
-'      "$ADV_HEALTH_PROBE_TIMEOUT_MS"
-    printf '    "health_max_missed": %s
-'      "$ADV_HEALTH_MAX_MISSED"
     printf '  }'
 }
 
@@ -939,12 +912,6 @@ build_advanced_yaml() {
 "     "$ADV_KEEPALIVE_SEC"
     printf "  dead_timeout_sec: %s
 "  "$ADV_DEAD_TIMEOUT_SEC"
-    printf "  health_probe_sec: %s
-"     "$ADV_HEALTH_PROBE_SEC"
-    printf "  health_probe_timeout_ms: %s
-"     "$ADV_HEALTH_PROBE_TIMEOUT_MS"
-    printf "  health_max_missed: %s
-"     "$ADV_HEALTH_MAX_MISSED"
 }
 
 write_server_config_tcp() {
@@ -1422,6 +1389,9 @@ quantum:
     fi
 }
 
+# quantum+ (rawmux): KCP over UDP, dagMux core, FEC 10/1. Needs no extra
+# block -- rawmux/kcp defaults are applied by the binary. Config shape is
+# just like tcp but with transport "quantum+".
 write_server_config_quantumplus() {
     local port="$1" psk="$2"
     shift 2
@@ -1600,6 +1570,8 @@ write_server_config_tun() {
 '
             printf '    "profile": "%s",
 '        "$profile"
+            { [ "$profile" = "tcp" ] || [ "$profile" = "udp" ]; } && [ -n "$TUN_L4_PORT" ] && printf '    "l4_port": %s,
+' "$TUN_L4_PORT"
             printf '    "listen_ip": "%s",
 '      "$listen_ip"
             printf '    "dst_ip": "%s",
@@ -1663,6 +1635,8 @@ write_server_config_tun() {
 '
             printf '  profile: "%s"
 '       "$profile"
+            { [ "$profile" = "tcp" ] || [ "$profile" = "udp" ]; } && [ -n "$TUN_L4_PORT" ] && printf '  l4_port: %s
+' "$TUN_L4_PORT"
             printf '  listen_ip: "%s"
 '     "$listen_ip"
             printf '  dst_ip: "%s"
@@ -1742,6 +1716,8 @@ write_client_config_tun() {
 '
             printf '    "profile": "%s",
 '        "$profile"
+            { [ "$profile" = "tcp" ] || [ "$profile" = "udp" ]; } && [ -n "$TUN_L4_PORT" ] && printf '    "l4_port": %s,
+' "$TUN_L4_PORT"
             printf '    "listen_ip": "%s",
 '      "$listen_ip"
             printf '    "dst_ip": "%s",
@@ -1806,6 +1782,8 @@ write_client_config_tun() {
 '
             printf '  profile: "%s"
 '       "$profile"
+            { [ "$profile" = "tcp" ] || [ "$profile" = "udp" ]; } && [ -n "$TUN_L4_PORT" ] && printf '  l4_port: %s
+' "$TUN_L4_PORT"
             printf '  listen_ip: "%s"
 '     "$listen_ip"
             printf '  dst_ip: "%s"
@@ -1928,36 +1906,37 @@ install_server() {
             ;;
         tun)
             echo ""
-            echo -e "  ${BOLD}TUN Encapsulation:${NC}"
-            echo "    1)  tcp   — plain TCP over TUN"
-            echo "    2)  ipx   — raw IP encapsulation (icmp/gre/ipip/bip)"
+            echo -e "  ${BOLD}TUN Encapsulation (profile):${NC}"
+            echo "    1)  tcp   — forged TCP segments"
+            echo "    2)  udp   — forged UDP datagrams"
+            echo "    3)  icmp  — ICMP encapsulation"
+            echo "    4)  gre   — GRE   (proto 47)"
+            echo "    5)  ipip  — IP-in-IP (proto 4)"
+            echo "    6)  bip   — BIP/ICMP custom (raw IP_HDRINCL)"
             echo ""
-            ask TUN_ENCAP_CHOICE "Encapsulation" "1"
-            case "$TUN_ENCAP_CHOICE" in
-                2|ipx) TUN_ENCAP="ipx" ;;
-                *)     TUN_ENCAP="tcp" ;;
+            echo -e "  ${DIM}tcp/udp carry ports, so NAT/CGNAT and TCP-only firewalls pass them —${NC}"
+            echo -e "  ${DIM}unlike gre/ipip which restrictive networks drop. Must match the other side.${NC}"
+            echo ""
+            ask TUN_PROFILE_CHOICE "Profile" "1"
+            case "$TUN_PROFILE_CHOICE" in
+                2|udp)  TUN_PROFILE="udp"  ;;
+                3|icmp) TUN_PROFILE="icmp" ;;
+                4|gre)  TUN_PROFILE="gre"  ;;
+                5|ipip) TUN_PROFILE="ipip" ;;
+                6|bip)  TUN_PROFILE="bip"  ;;
+                *)      TUN_PROFILE="tcp"  ;;
             esac
-
-            if [ "$TUN_ENCAP" = "ipx" ]; then
+            # 'encapsulation' is vestigial in the engine — 'profile' drives everything.
+            TUN_ENCAP="ipx"
+            TUN_L4_PORT=""
+            if [ "$TUN_PROFILE" = "tcp" ] || [ "$TUN_PROFILE" = "udp" ]; then
                 echo ""
-                echo -e "  ${BOLD}IPX Profile:${NC}"
-                echo "    1)  icmp  — ICMP encapsulation"
-                echo "    2)  gre   — GRE (proto 47)"
-                echo "    3)  ipip  — IP-in-IP (proto 4)"
-                echo "    4)  bip   — BIP/ICMP custom"
-                echo ""
-                ask TUN_PROFILE_CHOICE "Profile" "1"
-                case "$TUN_PROFILE_CHOICE" in
-                    2|gre)  TUN_PROFILE="gre"  ;;
-                    3|ipip) TUN_PROFILE="ipip" ;;
-                    4|bip)  TUN_PROFILE="bip"  ;;
-                    *)      TUN_PROFILE="icmp" ;;
-                esac
-            else
-                TUN_PROFILE="icmp"
+                echo -e "  ${DIM}Service port = destination port of client→server frames.${NC}"
+                echo -e "  ${DIM}443 looks like HTTPS and clears the most restrictive egress firewalls.${NC}"
+                ask TUN_L4_PORT "L4 service port" "443"
             fi
             echo ""
-            info "TUN : encapsulation=${TUN_ENCAP}  profile=${TUN_PROFILE}"
+            info "TUN : profile=${TUN_PROFILE}${TUN_L4_PORT:+  l4_port=${TUN_L4_PORT}}"
             echo ""
             _DEFAULT_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
             ask TUN_LOCAL_IP "Server real IP" "${_DEFAULT_IP}"
@@ -1972,7 +1951,7 @@ install_server() {
             ask TUN_NAME  "TUN device name" "dagger0"
             echo ""
             ask TUN_HEARTBEAT_SEC    "Heartbeat interval (sec)  -- lower = faster failure detection" "5"
-            ask TUN_IDLE_TIMEOUT_SEC "Idle timeout (sec)  -- how long with no traffic before reconnecting" "20"
+            ask TUN_IDLE_TIMEOUT_SEC "Idle timeout (sec)  -- how long with no traffic before reconnecting" "60"
             echo ""
             ask TUN_SPOOF_CHOICE "Enable IP Spoof (y/n)" "n"
             if [ "$TUN_SPOOF_CHOICE" = "y" ] || [ "$TUN_SPOOF_CHOICE" = "Y" ]; then
@@ -2131,29 +2110,24 @@ install_client() {
             ;;
         tun)
             echo ""
-            echo -e "  ${BOLD}TUN Encapsulation (must match server):${NC}"
-            echo "    1)  tcp   — plain TCP over TUN"
-            echo "    2)  ipx   — raw IP encapsulation"
+            echo -e "  ${BOLD}TUN Encapsulation / profile (must match server):${NC}"
+            echo "    1)  tcp   2)  udp   3)  icmp   4)  gre   5)  ipip   6)  bip"
             echo ""
-            ask TUN_ENCAP_CHOICE "Encapsulation" "1"
-            case "$TUN_ENCAP_CHOICE" in
-                2|ipx) TUN_ENCAP="ipx" ;;
-                *)     TUN_ENCAP="tcp" ;;
+            ask TUN_PROFILE_CHOICE "Profile" "1"
+            case "$TUN_PROFILE_CHOICE" in
+                2|udp)  TUN_PROFILE="udp"  ;;
+                3|icmp) TUN_PROFILE="icmp" ;;
+                4|gre)  TUN_PROFILE="gre"  ;;
+                5|ipip) TUN_PROFILE="ipip" ;;
+                6|bip)  TUN_PROFILE="bip"  ;;
+                *)      TUN_PROFILE="tcp"  ;;
             esac
-            if [ "$TUN_ENCAP" = "ipx" ]; then
+            TUN_ENCAP="ipx"
+            TUN_L4_PORT=""
+            if [ "$TUN_PROFILE" = "tcp" ] || [ "$TUN_PROFILE" = "udp" ]; then
                 echo ""
-                echo -e "  ${BOLD}IPX Profile (must match server):${NC}"
-                echo "    1)  icmp  2)  gre  3)  ipip  4)  bip"
-                echo ""
-                ask TUN_PROFILE_CHOICE "Profile" "1"
-                case "$TUN_PROFILE_CHOICE" in
-                    2|gre)  TUN_PROFILE="gre"  ;;
-                    3|ipip) TUN_PROFILE="ipip" ;;
-                    4|bip)  TUN_PROFILE="bip"  ;;
-                    *)      TUN_PROFILE="icmp" ;;
-                esac
-            else
-                TUN_PROFILE="icmp"
+                echo -e "  ${DIM}L4 service port — must match the server's value exactly.${NC}"
+                ask TUN_L4_PORT "L4 service port" "443"
             fi
             echo ""
             _DEFAULT_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
@@ -2169,7 +2143,7 @@ install_client() {
             ask TUN_NAME  "TUN device name" "dagger0"
             echo ""
             ask TUN_HEARTBEAT_SEC    "Heartbeat interval (sec)  -- doesn't need to match the server, but similar values make sense" "5"
-            ask TUN_IDLE_TIMEOUT_SEC "Idle timeout (sec)  -- how long with no traffic before reconnecting" "20"
+            ask TUN_IDLE_TIMEOUT_SEC "Idle timeout (sec)  -- how long with no traffic before reconnecting" "60"
             echo ""
             ask TUN_SPOOF_CHOICE "Enable IP Spoof (y/n)" "n"
             if [ "$TUN_SPOOF_CHOICE" = "y" ] || [ "$TUN_SPOOF_CHOICE" = "Y" ]; then
