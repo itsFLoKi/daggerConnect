@@ -135,13 +135,38 @@ detect_server_public_ip() {
     return 1
 }
 
+validate_ip() {
+    echo "$1" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'
+}
+
 ask_server_public_ip() {
     echo ""
-    SERVER_PUBLIC_IP=$(detect_server_public_ip)
-    if [ -z "$SERVER_PUBLIC_IP" ]; then
-        error "Could not auto-detect this server's public IP (no route to the detection services, and no default route found). Set it manually and re-run: DC_SERVER_PUBLIC_IP=<your public IP> bash setup.sh"
+    local detected
+    detected=$(detect_server_public_ip)
+
+    if [ -n "$detected" ]; then
+        info "Public IP : ${detected}  (auto-detected)"
+        ask USE_DETECTED "Use this IP? (y/n)" "y"
+        if [ "$USE_DETECTED" = "y" ] || [ "$USE_DETECTED" = "Y" ]; then
+            SERVER_PUBLIC_IP="$detected"
+            return
+        fi
+    else
+        warn "Could not auto-detect this server's public IP."
     fi
-    info "Public IP : ${SERVER_PUBLIC_IP}  (auto-detected)"
+
+    while true; do
+        ask SERVER_PUBLIC_IP "Enter server public IP manually" "$detected"
+        if [ -z "$SERVER_PUBLIC_IP" ]; then
+            warn "IP cannot be empty."
+            continue
+        fi
+        if validate_ip "$SERVER_PUBLIC_IP"; then
+            break
+        fi
+        warn "Invalid IP format. Example: 31.171.101.23"
+    done
+    info "Public IP : ${SERVER_PUBLIC_IP}  (manual)"
 }
 
 ask_transport() {
