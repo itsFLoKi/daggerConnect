@@ -152,8 +152,8 @@ ask_transport() {
     echo "    3)  wss     — WebSocket Secure (TLS) tunnel"
     echo "    4)  http    — HTTP Mimicry tunnel"
     echo "    5)  https   — HTTP Mimicry Secure (TLS) tunnel"
-    echo "    6)  quantum — Raw-packet tunnel (KCP over forged TCP; auto NIC/IP/gateway)"
-    echo "    7)  quantum+ — KCP over UDP (rawmux: dagMux core, FEC 10/1, UDP knock + fake-TCP; low overhead)"
+    echo "    6)  quantum — Raw-packet tunnel"
+    echo "    7)  quantum+ — KCP over UDP "
     echo "    8)  tun     — TUN kernel interface tunnel"
     echo ""
     while true; do
