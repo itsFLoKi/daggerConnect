@@ -741,6 +741,12 @@ ask_socks5() {
 }
 
 ADV_AUTO_TUNE="true"
+TUN_TUNE_PROFILE="auto"
+TUN_ENCRYPT="true"
+TUN_MTU=""
+TUN_SOCK_BUF=""
+TUN_RX_QUEUE=""
+TUN_TXQUEUELEN=""
 ADV_PROFILE="auto"
 ADV_TCP_KEEPALIVE="1"
 ADV_CONN_TIMEOUT="30"
@@ -793,7 +799,129 @@ apply_profile() {
     esac
 }
 
+# ── TUN performance profile + encryption ──────────────────────────────────────
+#
+# These are TUN-specific and separate from the "Tuner Mode" question below.
+# advanced.auto_tune sizes KCP windows and smux/socket buffers, none of which
+# the TUN datapath uses -- TUN runs on pcap and raw sockets, so it needs its
+# own dial. Both ends should use the SAME choice.
+# Numeric prompt with a range guard, so a typo cannot silently produce a config
+# the tunnel will choke on. Empty input keeps the profile default.
+ask_num_range() {
+    local __var="$1" prompt="$2" def="$3" lo="$4" hi="$5" val
+    while true; do
+        ask val "$prompt" "$def"
+        case "$val" in
+            ''|*[!0-9]*) warn "Enter a whole number." ; continue ;;
+        esac
+        if [ "$val" -lt "$lo" ] || [ "$val" -gt "$hi" ]; then
+            warn "Out of range — expected ${lo}..${hi}."
+            continue
+        fi
+        printf -v "$__var" '%s' "$val"
+        return
+    done
+}
+
+ask_tun_custom() {
+    echo ""
+    echo -e "  ${BOLD}Custom TUN values${NC}  ${DIM}(each one is explained; press Enter to accept)${NC}"
+    echo ""
+
+    echo -e "  ${DIM}MTU — bytes per packet on the tunnel. Higher means fewer packets for${NC}"
+    echo -e "  ${DIM}the same data, but anything above the real path MTU fragments, which${NC}"
+    echo -e "  ${DIM}costs far more than it saves. 1400-1460 is the safe band.${NC}"
+    ask_num_range TUN_MTU "  mtu            (bytes)" "1420" 576 9000
+    echo ""
+
+    echo -e "  ${DIM}sock_buf — pcap capture/inject buffer. Absorbs inbound bursts; this${NC}"
+    echo -e "  ${DIM}memory is reserved whether it is used or not, so keep it modest on a${NC}"
+    echo -e "  ${DIM}small VPS. 2097152 = 2MB, 4194304 = 4MB, 16777216 = 16MB.${NC}"
+    ask_num_range TUN_SOCK_BUF "  sock_buf       (bytes)" "4194304" 262144 67108864
+    echo ""
+
+    echo -e "  ${DIM}rx_queue — inbound frames buffered between the packet reader and the${NC}"
+    echo -e "  ${DIM}tunnel. The only place INBOUND delay can build up, so deeper survives${NC}"
+    echo -e "  ${DIM}bigger bursts but raises worst-case latency.${NC}"
+    ask_num_range TUN_RX_QUEUE "  rx_queue       (frames)" "512" 64 8192
+    echo ""
+
+    echo -e "  ${BOLD}txqueuelen${NC} ${DIM}— kernel queue on the TUN device. There is no userspace${NC}"
+    echo -e "  ${DIM}send queue any more, so THIS is the outbound buffer and the main${NC}"
+    echo -e "  ${DIM}latency/throughput dial: short keeps ping flat under load, long${NC}"
+    echo -e "  ${DIM}tolerates burstier senders. gaming=100, stable=500, speed=2000.${NC}"
+    ask_num_range TUN_TXQUEUELEN "  txqueuelen     (packets)" "500" 10 10000
+
+    # Make the tradeoff concrete instead of abstract: worst-case time to drain
+    # a full outbound queue on a saturated 50Mbit link.
+    local ms=$(( TUN_TXQUEUELEN * TUN_MTU * 8 / 50000 ))
+    echo ""
+    if [ "$ms" -gt 250 ]; then
+        warn "A full outbound queue is ~${ms} ms on a saturated 50Mbit link (high ping under load)."
+    else
+        info "A full outbound queue is ~${ms} ms on a saturated 50Mbit link."
+    fi
+}
+
+ask_tun_profile() {
+    echo ""
+    echo -e "  ${BOLD}TUN Performance Profile:${NC}"
+    echo "    1)  auto    — Sizes buffers from this machine's RAM (recommended)"
+    echo "    2)  stable  — Balanced: low, steady ping with good bandwidth"
+    echo "    3)  speed   — Maximum throughput; deeper buffers, higher ping under load"
+    echo "    4)  gaming  — Shortest queues: lowest and flattest ping, less bandwidth"
+    echo "    5)  custom  — Set every value yourself"
+    echo ""
+    echo -e "  ${DIM}What changes: pcap buffer, MTU, inbound queue, and the kernel${NC}"
+    echo -e "  ${DIM}txqueuelen on the TUN device (the main latency/throughput dial).${NC}"
+    echo ""
+    ask TUN_PROF_CHOICE "TUN Profile" "1"
+    TUN_MTU=""; TUN_SOCK_BUF=""; TUN_RX_QUEUE=""; TUN_TXQUEUELEN=""
+    case "$TUN_PROF_CHOICE" in
+        1|auto)   TUN_TUNE_PROFILE="auto"   ;;
+        2|stable) TUN_TUNE_PROFILE="stable" ;;
+        3|speed)  TUN_TUNE_PROFILE="speed"  ;;
+        4|gaming) TUN_TUNE_PROFILE="gaming" ;;
+        5|custom) TUN_TUNE_PROFILE="custom"; ask_tun_custom ;;
+        *)        TUN_TUNE_PROFILE="auto"   ;;
+    esac
+
+    echo ""
+    echo -e "  ${BOLD}Encrypt tunnel payload (AES-GCM):${NC}"
+    echo -e "  ${DIM}ON  = each packet is sealed. Costs ~0.6us/packet, i.e. a ceiling${NC}"
+    echo -e "  ${DIM}      around 7 Gbit/s on one core -- not what limits a real link.${NC}"
+    echo -e "  ${DIM}OFF = fastest possible, but the tunnel carries plaintext IP:${NC}"
+    echo -e "  ${DIM}      anyone on the path can read and modify it, and DPI can${NC}"
+    echo -e "  ${DIM}      classify it directly. Only for a trusted path.${NC}"
+    echo ""
+    ask TUN_ENC_CHOICE "Enable encryption (y/n)" "y"
+    case "$TUN_ENC_CHOICE" in
+        n|N|no|NO) TUN_ENCRYPT="false" ;;
+        *)         TUN_ENCRYPT="true"  ;;
+    esac
+
+    echo ""
+    if [ "$TUN_ENCRYPT" = "true" ]; then
+        info "TUN Profile : ${TUN_TUNE_PROFILE}  |  encryption: on"
+    else
+        warn "TUN Profile : ${TUN_TUNE_PROFILE}  |  encryption: OFF - traffic is readable on the path"
+    fi
+    warn "Use the SAME profile and encryption setting on BOTH ends."
+}
+
 ask_advanced() {
+    # The Tuner Mode below sizes KCP windows and smux/socket buffers. The TUN
+    # datapath uses none of them -- it runs on pcap and raw sockets -- so asking
+    # about it here would imply a control it does not have. TUN is tuned by the
+    # "TUN Performance Profile" question instead. The advanced block is still
+    # written with balanced defaults because a few of its values (session and
+    # UDP-flow timeouts) do apply to the forwarded port mappings.
+    if [ "$TRANSPORT" = "tun" ]; then
+        ADV_AUTO_TUNE="true"
+        apply_profile "stable"
+        info "Tuner Mode : not applicable to tun — TUN is tuned by its own profile above."
+        return
+    fi
     echo ""
     echo -e "  ${BOLD}Tuner Mode:${NC}"
     echo "    1)  auto         — Adaptive auto-tuner (recommended)"
@@ -1581,8 +1709,16 @@ write_server_config_tun() {
 '     "$local_addr"
             printf '    "remote_addr": "%s",
 '    "$remote_addr"
-            printf '    "mtu": 1420,
-'
+            printf '    "profile": "%s",
+' "$TUN_TUNE_PROFILE"
+            printf '    "encrypt": %s,
+' "$TUN_ENCRYPT"
+            [ -n "$TUN_MTU"        ] && printf '    "mtu": %s,
+' "$TUN_MTU"
+            [ -n "$TUN_RX_QUEUE"   ] && printf '    "rx_queue": %s,
+' "$TUN_RX_QUEUE"
+            [ -n "$TUN_TXQUEUELEN" ] && printf '    "tx_queue_len": %s,
+' "$TUN_TXQUEUELEN"
             printf '    "heartbeat_sec": %s,
 ' "$heartbeat_sec"
             printf '    "idle_timeout_sec": %s
@@ -1609,8 +1745,8 @@ write_server_config_tun() {
 ' "$spoof_src"
             [ -n "$spoof_dst" ] && printf '    "spoof_dst_ip": "%s",
 ' "$spoof_dst"
-            printf '    "sock_buf": 4194304
-'
+            printf '    "sock_buf": %s
+' "${TUN_SOCK_BUF:-0}"
             printf '  },
 '
             build_socks5_json
@@ -1647,8 +1783,16 @@ write_server_config_tun() {
 '    "$local_addr"
             printf '  remote_addr: "%s"
 '   "$remote_addr"
-            printf '  mtu: 1420
-'
+            printf '  profile: "%s"
+' "$TUN_TUNE_PROFILE"
+            printf '  encrypt: %s
+' "$TUN_ENCRYPT"
+            [ -n "$TUN_MTU"        ] && printf '  mtu: %s
+' "$TUN_MTU"
+            [ -n "$TUN_RX_QUEUE"   ] && printf '  rx_queue: %s
+' "$TUN_RX_QUEUE"
+            [ -n "$TUN_TXQUEUELEN" ] && printf '  tx_queue_len: %s
+' "$TUN_TXQUEUELEN"
             printf '  heartbeat_sec: %s
 ' "$heartbeat_sec"
             printf '  idle_timeout_sec: %s
@@ -1674,9 +1818,9 @@ write_server_config_tun() {
 ' "$spoof_src"
             [ -n "$spoof_dst" ] && printf '  spoof_dst_ip: "%s"
 ' "$spoof_dst"
-            printf '  sock_buf: 4194304
+            printf '  sock_buf: %s
 
-'
+' "${TUN_SOCK_BUF:-0}"
             build_socks5_yaml
             build_advanced_yaml
         } > "$CONFIG"
@@ -1727,8 +1871,16 @@ write_client_config_tun() {
 '     "$local_addr"
             printf '    "remote_addr": "%s",
 '    "$remote_addr"
-            printf '    "mtu": 1420,
-'
+            printf '    "profile": "%s",
+' "$TUN_TUNE_PROFILE"
+            printf '    "encrypt": %s,
+' "$TUN_ENCRYPT"
+            [ -n "$TUN_MTU"        ] && printf '    "mtu": %s,
+' "$TUN_MTU"
+            [ -n "$TUN_RX_QUEUE"   ] && printf '    "rx_queue": %s,
+' "$TUN_RX_QUEUE"
+            [ -n "$TUN_TXQUEUELEN" ] && printf '    "tx_queue_len": %s,
+' "$TUN_TXQUEUELEN"
             printf '    "heartbeat_sec": %s,
 ' "$heartbeat_sec"
             printf '    "idle_timeout_sec": %s
@@ -1755,8 +1907,8 @@ write_client_config_tun() {
 ' "$spoof_src"
             [ -n "$spoof_dst" ] && printf '    "spoof_dst_ip": "%s",
 ' "$spoof_dst"
-            printf '    "sock_buf": 4194304
-'
+            printf '    "sock_buf": %s
+' "${TUN_SOCK_BUF:-0}"
             printf '  },
 '
             build_advanced_json
@@ -1794,8 +1946,16 @@ write_client_config_tun() {
 '    "$local_addr"
             printf '  remote_addr: "%s"
 '   "$remote_addr"
-            printf '  mtu: 1420
-'
+            printf '  profile: "%s"
+' "$TUN_TUNE_PROFILE"
+            printf '  encrypt: %s
+' "$TUN_ENCRYPT"
+            [ -n "$TUN_MTU"        ] && printf '  mtu: %s
+' "$TUN_MTU"
+            [ -n "$TUN_RX_QUEUE"   ] && printf '  rx_queue: %s
+' "$TUN_RX_QUEUE"
+            [ -n "$TUN_TXQUEUELEN" ] && printf '  tx_queue_len: %s
+' "$TUN_TXQUEUELEN"
             printf '  heartbeat_sec: %s
 ' "$heartbeat_sec"
             printf '  idle_timeout_sec: %s
@@ -1821,9 +1981,9 @@ write_client_config_tun() {
 ' "$spoof_src"
             [ -n "$spoof_dst" ] && printf '  spoof_dst_ip: "%s"
 ' "$spoof_dst"
-            printf '  sock_buf: 4194304
+            printf '  sock_buf: %s
 
-'
+' "${TUN_SOCK_BUF:-0}"
             build_advanced_yaml
         } > "$CONFIG"
     fi
@@ -1905,8 +2065,15 @@ install_server() {
     ask_transport
     echo ""
 
-    ask PORT "Listen port" "8443"
-    echo ""
+    # TUN never binds a listen socket: TunTransport.Listen ignores the address
+    # entirely and talks to the wire through pcap, so a port here would be a
+    # question with no effect. A placeholder keeps the config shape valid.
+    if [ "$TRANSPORT" = "tun" ]; then
+        PORT="8443"
+    else
+        ask PORT "Listen port" "8443"
+        echo ""
+    fi
 
     ask_required PSK "PSK  (must match client)"
     echo ""
@@ -1977,6 +2144,7 @@ install_server() {
             echo ""
             ask TUN_HEARTBEAT_SEC    "Heartbeat interval (sec)  -- lower = faster failure detection" "5"
             ask TUN_IDLE_TIMEOUT_SEC "Idle timeout (sec)  -- how long with no traffic before reconnecting" "60"
+            ask_tun_profile
             echo ""
             ask TUN_SPOOF_CHOICE "Enable IP Spoof (y/n)" "n"
             if [ "$TUN_SPOOF_CHOICE" = "y" ] || [ "$TUN_SPOOF_CHOICE" = "Y" ]; then
@@ -2099,18 +2267,26 @@ install_client() {
         ask_connection_pool
     fi
 
-    while true; do
-        echo -e "        Example : 1.1.1.1:8443"
-        ask SERVER_ADDR "Server IP And Port" ""
-        SERVER_IP="${SERVER_ADDR%%:*}"
-        SERVER_PORT="${SERVER_ADDR##*:}"
-        if [ -z "$SERVER_IP" ] || [ -z "$SERVER_PORT" ] || [ "$SERVER_IP" = "$SERVER_PORT" ]; then
-            warn "Invalid format. Use IP:PORT (e.g. 1.1.1.1:8443)"
-        else
-            break
-        fi
-    done
-    echo ""
+    # For TUN the server is identified by its REAL IP, which is asked below as
+    # "Server real IP" -- and the transport never dials a port, so asking for
+    # IP:PORT here would be both redundant and misleading. The placeholder port
+    # only keeps the generated config's addr field well-formed.
+    if [ "$TRANSPORT" = "tun" ]; then
+        SERVER_PORT="8443"
+    else
+        while true; do
+            echo -e "        Example : 1.1.1.1:8443"
+            ask SERVER_ADDR "Server IP And Port" ""
+            SERVER_IP="${SERVER_ADDR%%:*}"
+            SERVER_PORT="${SERVER_ADDR##*:}"
+            if [ -z "$SERVER_IP" ] || [ -z "$SERVER_PORT" ] || [ "$SERVER_IP" = "$SERVER_PORT" ]; then
+                warn "Invalid format. Use IP:PORT (e.g. 1.1.1.1:8443)"
+            else
+                break
+            fi
+        done
+        echo ""
+    fi
 
     ask_required PSK "PSK  (must match server)"
     echo ""
@@ -2169,6 +2345,7 @@ install_client() {
             echo ""
             ask TUN_HEARTBEAT_SEC    "Heartbeat interval (sec)  -- doesn't need to match the server, but similar values make sense" "5"
             ask TUN_IDLE_TIMEOUT_SEC "Idle timeout (sec)  -- how long with no traffic before reconnecting" "60"
+            ask_tun_profile
             echo ""
             ask TUN_SPOOF_CHOICE "Enable IP Spoof (y/n)" "n"
             if [ "$TUN_SPOOF_CHOICE" = "y" ] || [ "$TUN_SPOOF_CHOICE" = "Y" ]; then
@@ -2214,7 +2391,13 @@ install_client() {
     echo -e "  Channel   : ${BOLD}${CHANNEL}${NC}"
     echo -e "  Version   : ${BOLD}${VERSION}${NC}"
     echo -e "  Transport : ${BOLD}${TRANSPORT}${NC}"
-    echo -e "  Server    : ${BOLD}${SERVER_IP}:${SERVER_PORT}${NC}"
+    if [ "$TRANSPORT" = "tun" ]; then
+        # No port is involved on this transport; showing one would invite the
+        # user to "fix" a firewall rule that does not exist.
+        echo -e "  Server    : ${BOLD}${TUN_PEER_IP}${NC}  ${DIM}(tun — no listen port)${NC}"
+    else
+        echo -e "  Server    : ${BOLD}${SERVER_IP}:${SERVER_PORT}${NC}"
+    fi
     echo -e "  PSK       : ${BOLD}${PSK}${NC}"
     [ "$TRANSPORT" = "ws"  ] && echo -e "  WS Path   : ${BOLD}${WS_PATH}${NC}"
     if [ "$TRANSPORT" = "wss" ]; then
