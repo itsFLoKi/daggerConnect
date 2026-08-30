@@ -16,6 +16,15 @@ CONFIG_FMT=""
 SERVICE_NAME=""
 SERVICE_FILE=""
 TRANSPORT=""
+XHTTP_CDN="false"
+XHTTP_CDN_HOST=""
+XHTTP_CDN_PORT="443"
+XHTTP_CDN_IPS=""
+XHTTP_INSECURE="true"
+XHTTP_ORIGIN_PORT="8443"
+XHTTP_PEER_IP=""
+XHTTP_PUBLIC_IP=""
+XHTTP_CDN_POOL="4"
 CHANNEL=""
 VERSION=""
 SERVER_PUBLIC_IP=""
@@ -180,6 +189,8 @@ ask_transport() {
     echo "    6)  quantum — Raw-packet tunnel"
     echo "    7)  quantum+ — KCP over UDP "
     echo "    8)  tun     — TUN kernel interface tunnel"
+    echo "    9)  xhttp   — real HTTP carrier (passes through a CDN)"
+    echo "   10)  xhttps  — real HTTPS carrier + Cloudflare edge addresses"
     echo ""
     while true; do
         ask T_CHOICE "Transport" "1"
@@ -192,10 +203,188 @@ ask_transport() {
             6|quantum) TRANSPORT="quantum"; break ;;
             7|quantum+|quantumplus|qplus) TRANSPORT="quantum+"; break ;;
             8|tun)     TRANSPORT="tun";     break ;;
-            *) warn "Please enter 1-8 or transport name." ;;
+            9|xhttp)   TRANSPORT="xhttp";   break ;;
+            10|xhttps) TRANSPORT="xhttps";  break ;;
+            *) warn "Please enter 1-10 or transport name." ;;
         esac
     done
     info "Transport : ${TRANSPORT}"
+}
+
+ask_xhttp() {
+    local side="$1"
+    echo ""
+    echo -e "  ${BOLD}xhttp settings${NC}"
+    echo -e "  ${DIM}The path is a URL prefix and must match on both ends.${NC}"
+    echo -e "  ${DIM}Pick something an ordinary site would have, not /tunnel.${NC}"
+    ask XHTTP_PATH "URL path  (must match the other side)" "/api/v2"
+    case "$XHTTP_PATH" in
+        /*) ;;
+        *) XHTTP_PATH="/$XHTTP_PATH" ;;
+    esac
+
+    if [ "$side" = "client" ]; then
+        echo ""
+        echo -e "  ${BOLD}How should uploads be sent?${NC}"
+        echo "    1)  auto       — try the fast way, fall back if the path won't carry it  (recommended)"
+        echo "    2)  streaming  — one long upload request. Fastest, but some CDNs buffer it and it stalls"
+        echo "    3)  sequenced  — many small upload requests. A little slower, gets through almost anything"
+        echo ""
+        echo -e "  ${DIM}Through Cloudflare, auto usually settles on sequenced after about${NC}"
+        echo -e "  ${DIM}20 seconds. Choosing sequenced outright skips that wait.${NC}"
+        echo ""
+        ask XHTTP_MODE_CHOICE "Upload mode" "1"
+        case "$XHTTP_MODE_CHOICE" in
+            2|stream|streaming|stream-up) XHTTP_MODE="stream-up" ;;
+            3|packet|sequenced|packet-up) XHTTP_MODE="packet-up" ;;
+            *) XHTTP_MODE="auto" ;;
+        esac
+        info "Upload mode : ${XHTTP_MODE}"
+    else
+        XHTTP_MODE="auto"
+    fi
+}
+
+ask_xhttp_cdn() {
+    local side="$1"
+    XHTTP_CDN="false"
+    XHTTP_CDN_HOST=""
+    XHTTP_CDN_PORT="443"
+    XHTTP_CDN_IPS=""
+    XHTTP_INSECURE="true"
+    XHTTP_ORIGIN_PORT="8443"
+    XHTTP_PEER_IP=""
+    XHTTP_PUBLIC_IP=""
+
+    echo ""
+    echo -e "  ${YELLOW}Answer the same on both sides.${NC}"
+    echo ""
+    ask XHTTP_CDN_CHOICE "Use Cloudflare (y/n)" "n"
+    case "$XHTTP_CDN_CHOICE" in
+        y|Y|yes) ;;
+        *) return ;;
+    esac
+
+    XHTTP_CDN="true"
+    XHTTP_INSECURE="false"
+
+    if [ "$side" = "client" ]; then
+        echo ""
+        echo -e "  ${BOLD}This side is the origin${NC}"
+        echo -e "  ${DIM}Cloudflare connects to THIS machine. Point your domain's DNS record${NC}"
+        echo -e "  ${DIM}here, orange cloud on, and open the port below in the firewall.${NC}"
+        echo ""
+        ask XHTTP_ORIGIN_PORT "Port to wait on" "8443"
+        ok "Waiting for Cloudflare on port ${XHTTP_ORIGIN_PORT}"
+
+        echo ""
+        local mine
+        mine=$(detect_server_public_ip)
+        while true; do
+            ask XHTTP_PUBLIC_IP "Client IP  (blank = skip)" "$mine"
+            [ -z "$XHTTP_PUBLIC_IP" ] && break
+            validate_ip "$XHTTP_PUBLIC_IP" && break
+            warn "That is not an IP address."
+        done
+        return
+    fi
+
+    ask_required XHTTP_CDN_HOST "Your Cloudflare-proxied domain  (e.g. cdn.example.com)"
+    echo ""
+    echo -e "  ${YELLOW}That domain's DNS record must point at the FOREIGN server,${NC}"
+    echo -e "  ${YELLOW}not at this one, with the orange cloud on.${NC}"
+    echo ""
+    echo -e "  ${DIM}Cloudflare forwards these HTTPS ports only:${NC}"
+    echo -e "  ${DIM}443, 2053, 2083, 2087, 2096, 8443${NC}"
+    echo -e "  ${DIM}Use the same port the far side waits on.${NC}"
+    ask XHTTP_CDN_PORT "Port" "443"
+    echo ""
+    echo -e "  ${BOLD}Edge addresses${NC}"
+    echo -e "  ${DIM}Every Cloudflare address accepts every domain behind Cloudflare and${NC}"
+    echo -e "  ${DIM}works out where to send the request from the domain name, not from${NC}"
+    echo -e "  ${DIM}the address dialled. So put any addresses that are not blocked from${NC}"
+    echo -e "  ${DIM}here, separated by commas. They are tried in order; if one stops${NC}"
+    echo -e "  ${DIM}working the next is used.${NC}"
+    echo -e "  ${DIM}Example: 104.17.12.5,162.159.36.7,172.67.180.44${NC}"
+    echo ""
+    while true; do
+        ask_required XHTTP_CDN_IPS "Edge addresses"
+        if validate_edge_ips "$XHTTP_CDN_IPS"; then
+            break
+        fi
+    done
+    XHTTP_CDN_IPS="$(normalize_edge_ips "$XHTTP_CDN_IPS")"
+    ok "Edge addresses: ${XHTTP_CDN_IPS}"
+
+    echo ""
+    echo -e "  ${BOLD}How many connections should it keep open?${NC}"
+    echo -e "  ${DIM}In Cloudflare mode this side dials, so the pool lives here.${NC}"
+    echo ""
+    ask XHTTP_CDN_POOL "Connections" "4"
+    case "$XHTTP_CDN_POOL" in
+        ''|*[!0-9]*) XHTTP_CDN_POOL="4" ;;
+    esac
+
+    echo ""
+    ask XHTTP_PEER_IP "Client IP  (blank = accept any)" ""
+    [ -n "$XHTTP_PEER_IP" ] && ok "Only ${XHTTP_PEER_IP} will be accepted"
+}
+
+validate_edge_ips() {
+    local list="$1" ip bad=0 count=0
+    IFS=',' read -ra _VIPS <<< "$list"
+    for ip in "${_VIPS[@]}"; do
+        ip="$(echo "$ip" | xargs)"
+        [ -z "$ip" ] && continue
+        count=$((count + 1))
+        if ! [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            warn "\"${ip}\" is not an IP address."
+            bad=1
+            continue
+        fi
+        local o
+        for o in ${ip//./ }; do
+            if [ "$o" -gt 255 ] 2>/dev/null; then
+                warn "\"${ip}\" is not a valid IP address (${o} is above 255)."
+                bad=1
+                break
+            fi
+        done
+    done
+    if [ "$count" -eq 0 ]; then
+        warn "Enter at least one address."
+        return 1
+    fi
+    [ "$bad" -eq 0 ]
+}
+
+normalize_edge_ips() {
+    local list="$1" out="" ip
+    IFS=',' read -ra _NIPS <<< "$list"
+    for ip in "${_NIPS[@]}"; do
+        ip="$(echo "$ip" | xargs)"
+        [ -z "$ip" ] && continue
+        [ -n "$out" ] && out="${out},"
+        out="${out}${ip}"
+    done
+    printf '%s' "$out"
+}
+
+build_edge_ips_json() {
+    local ips="$1" out="" ip
+    [ -z "$ips" ] && { printf ''; return; }
+    IFS=',' read -ra _EIPS <<< "$ips"
+    for ip in "${_EIPS[@]}"; do
+        ip="$(echo "$ip" | xargs)"
+        [ -z "$ip" ] && continue
+        [ -n "$out" ] && out="${out}, "
+        out="${out}\"${ip}\""
+    done
+    printf '%s' "$out"
+}
+
+build_edge_ips_yaml() {
+    printf '[%s]' "$(build_edge_ips_json "$1")"
 }
 
 install_certbot() {
@@ -261,22 +450,71 @@ EOF
     ok "Auto-renew hook installed."
 }
 
-ask_ssl_server() {
+install_openssl() {
+    command -v openssl &>/dev/null && return
+    info "Installing openssl..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq && apt-get install -y -qq openssl
+    elif command -v yum &>/dev/null; then
+        yum install -y -q openssl
+    elif command -v dnf &>/dev/null; then
+        dnf install -y -q openssl
+    else
+        error "Cannot install openssl — package manager not found. Install it manually."
+    fi
+}
+
+make_self_signed_cert() {
+    local domain="$1"
+    local dir="/etc/daggerconnect/tls"
+
+    install_openssl
+    mkdir -p "$dir"
+    CERT_FILE="${dir}/${SERVICE_NAME}.crt"
+    KEY_FILE="${dir}/${SERVICE_NAME}.key"
+
+    info "Creating a self-signed certificate for ${domain} ..."
+    if ! openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+            -keyout "$KEY_FILE" -out "$CERT_FILE" \
+            -subj "/CN=${domain}" \
+            -addext "subjectAltName=DNS:${domain}" >/dev/null 2>&1; then
+        openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+            -keyout "$KEY_FILE" -out "$CERT_FILE" \
+            -subj "/CN=${domain}" >/dev/null 2>&1 \
+            || error "openssl could not create the certificate."
+    fi
+    chmod 600 "$KEY_FILE"
+    chmod 644 "$CERT_FILE"
+    ok "Cert : ${CERT_FILE}"
+    ok "Key  : ${KEY_FILE}"
+    ok "Valid for 10 years. Set Cloudflare's SSL mode to \"Full\"."
+}
+
+ask_ssl_cert() {
     echo ""
-    echo -e "  ${BOLD}SSL Mode:${NC}"
-    echo "    1)  Automatic SSL  — Let's Encrypt (certbot)"
-    echo "    2)  Custom SSL     — Provide your own cert/key paths"
+    echo -e "  ${BOLD}Certificate:${NC}"
+    echo "    1)  Self-signed  — made here with openssl (use Cloudflare SSL mode \"Full\")"
+    echo "    2)  Let's Encrypt — certbot, needs port 80 open and DNS pointing here"
+    echo "    3)  Custom        — paths to a cert and key you already have"
     echo ""
     while true; do
-        ask SSL_CHOICE "SSL Mode" "1"
+        ask SSL_CHOICE "Certificate" "1"
         case "$SSL_CHOICE" in
-            1|auto)   SSL_MODE="auto";   break ;;
-            2|custom) SSL_MODE="custom"; break ;;
-            *) warn "Please enter 1 (auto) or 2 (custom)." ;;
+            1|self|selfsigned) SSL_MODE="self";   break ;;
+            2|auto|letsencrypt) SSL_MODE="auto";  break ;;
+            3|custom)          SSL_MODE="custom"; break ;;
+            *) warn "Please enter 1, 2 or 3." ;;
         esac
     done
 
     case "$SSL_MODE" in
+        self)
+            echo ""
+            local def_domain="${XHTTP_CDN_HOST:-daggerconnect.local}"
+            ask DOMAIN "Domain name" "$def_domain"
+            echo ""
+            make_self_signed_cert "$DOMAIN"
+            ;;
         auto)
             echo ""
             ask_required DOMAIN "Domain name  (e.g. tunnel.example.com)"
@@ -302,22 +540,6 @@ ask_ssl_server() {
     esac
 }
 
-ask_ssl_client() {
-    echo ""
-    echo -e "  ${BOLD}Server Certificate Verification:${NC}"
-    echo "    1)  Verify  — Recommended (server has valid cert)"
-    echo "    2)  Skip    — Skip TLS verification (self-signed)"
-    echo ""
-    while true; do
-        ask TLS_CHOICE "TLS Verify" "1"
-        case "$TLS_CHOICE" in
-            1|verify) TLS_INSECURE="false"; break ;;
-            2|skip)   TLS_INSECURE="true";  break ;;
-            *) warn "Please enter 1 (verify) or 2 (skip)." ;;
-        esac
-    done
-}
-
 check_ptrace_scope() {
     local f=/proc/sys/kernel/yama/ptrace_scope
     [ -r "$f" ] || return 0
@@ -331,11 +553,6 @@ check_ptrace_scope() {
     fi
 }
 
-# tune_network raises the kernel network limits that otherwise cap tunnel
-# throughput and switches to the fq+BBR pair for the best goodput AND lowest
-# latency. Applied immediately AND persisted across reboots. Idempotent and
-# best-effort -- safe to run on every install. Mirrors the binary's built-in
-# tuneHostNetwork() so bandwidth is high whether or not auto_tune is on.
 tune_network() {
     hr "Network Tuning (fq + BBR, big buffers)"
 
@@ -361,7 +578,6 @@ net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_slow_start_after_idle = 0
 EOF
 
-    # BBR needs the tcp_bbr module -- load now and persist so it survives reboot.
     modprobe tcp_bbr 2>/dev/null || true
     if [ ! -f /etc/modules-load.d/daggerconnect-bbr.conf ]; then
         echo "tcp_bbr" > /etc/modules-load.d/daggerconnect-bbr.conf 2>/dev/null || true
@@ -799,14 +1015,6 @@ apply_profile() {
     esac
 }
 
-# ── TUN performance profile + encryption ──────────────────────────────────────
-#
-# These are TUN-specific and separate from the "Tuner Mode" question below.
-# advanced.auto_tune sizes KCP windows and smux/socket buffers, none of which
-# the TUN datapath uses -- TUN runs on pcap and raw sockets, so it needs its
-# own dial. Both ends should use the SAME choice.
-# Numeric prompt with a range guard, so a typo cannot silently produce a config
-# the tunnel will choke on. Empty input keeps the profile default.
 ask_num_range() {
     local __var="$1" prompt="$2" def="$3" lo="$4" hi="$5" val
     while true; do
@@ -852,8 +1060,6 @@ ask_tun_custom() {
     echo -e "  ${DIM}tolerates burstier senders. gaming=100, stable=500, speed=2000.${NC}"
     ask_num_range TUN_TXQUEUELEN "  txqueuelen     (packets)" "500" 10 10000
 
-    # Make the tradeoff concrete instead of abstract: worst-case time to drain
-    # a full outbound queue on a saturated 50Mbit link.
     local ms=$(( TUN_TXQUEUELEN * TUN_MTU * 8 / 50000 ))
     echo ""
     if [ "$ms" -gt 250 ]; then
@@ -910,12 +1116,6 @@ ask_tun_profile() {
 }
 
 ask_advanced() {
-    # The Tuner Mode below sizes KCP windows and smux/socket buffers. The TUN
-    # datapath uses none of them -- it runs on pcap and raw sockets -- so asking
-    # about it here would imply a control it does not have. TUN is tuned by the
-    # "TUN Performance Profile" question instead. The advanced block is still
-    # written with balanced defaults because a few of its values (session and
-    # UDP-flow timeouts) do apply to the forwarded port mappings.
     if [ "$TRANSPORT" = "tun" ]; then
         ADV_AUTO_TUNE="true"
         apply_profile "stable"
@@ -986,7 +1186,6 @@ ask_advanced() {
     esac
     info "Tuner Profile : ${ADV_PROFILE}$([ "$ADV_AUTO_TUNE" = "true" ] && echo " (adaptive)" || echo " (fixed)")"
 }
-
 
 build_advanced_json() {
     printf '  "advanced": {
@@ -1067,6 +1266,81 @@ build_advanced_yaml() {
 "  "$ADV_DEAD_TIMEOUT_SEC"
 }
 
+dc_applies() {
+    case "$TRANSPORT" in
+        quantum|tun) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+build_dc_json() {
+    dc_applies || return 0
+    [ "$DC_PROFILE" = "auto" ] && return 0
+    printf '  "dc": {
+    "streams_per_carrier": %s,
+    "max_carriers": %s,
+    "carrier_lifetime_secs": %s
+  },
+' "$DC_STREAMS" "$DC_CARRIERS" "$DC_LIFETIME"
+}
+
+build_dc_yaml() {
+    dc_applies || return 0
+    [ "$DC_PROFILE" = "auto" ] && return 0
+    printf 'dc:
+  streams_per_carrier: %s
+  max_carriers: %s
+  carrier_lifetime_secs: %s
+
+' "$DC_STREAMS" "$DC_CARRIERS" "$DC_LIFETIME"
+}
+
+ask_dc() {
+    DC_PROFILE="auto"; DC_STREAMS=8; DC_CARRIERS=32; DC_LIFETIME=1500
+
+    if ! dc_applies; then
+        info "DC core : not used by ${TRANSPORT}"
+        return
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}DC core — how many connections share one carrier${NC}"
+    echo -e "  ${DIM}A lost packet stalls everyone sharing that carrier until it is resent.${NC}"
+    echo -e "  ${DIM}Fewer per carrier = better isolation, more connections to the network.${NC}"
+    echo ""
+    echo "    1) Balanced   — 8 per carrier   (recommended)"
+    echo "    2) Stability  — 4 per carrier   (lossy or heavily filtered path)"
+    echo "    3) Speed      — 16 per carrier  (clean path, fewer connections)"
+    echo "    4) Custom"
+    echo ""
+    while true; do
+        ask DC_CHOICE "Profile" "1"
+        case "$DC_CHOICE" in
+            1|balanced|auto)
+                DC_PROFILE="auto"
+                info "DC core : balanced (8 per carrier, up to 32 carriers)"
+                break ;;
+            2|stability|stable)
+                DC_PROFILE="stable"; DC_STREAMS=4; DC_CARRIERS=32; DC_LIFETIME=900
+                info "DC core : stability (4 per carrier, up to 32 carriers, renewed every 15m)"
+                break ;;
+            3|speed|fast)
+                DC_PROFILE="speed"; DC_STREAMS=16; DC_CARRIERS=16; DC_LIFETIME=1800
+                info "DC core : speed (16 per carrier, up to 16 carriers)"
+                break ;;
+            4|custom)
+                DC_PROFILE="custom"
+                ask_num_range DC_STREAMS "Connections per carrier" 8 1 64
+                ask_num_range DC_CARRIERS "Maximum carriers" 32 2 64
+                ask_num_range DC_LIFETIME "Renew a carrier after (seconds, 0 = never)" 1500 0 86400
+                [ "$DC_LIFETIME" = "0" ] && DC_LIFETIME=-1
+                info "DC core : custom (${DC_STREAMS} per carrier, up to ${DC_CARRIERS} carriers)"
+                break ;;
+            *) warn "Please enter 1-4." ;;
+        esac
+    done
+}
+
 write_server_config_tcp() {
     local port="$1" psk="$2"
     shift 2
@@ -1089,7 +1363,7 @@ write_server_config_tcp() {
       ]
     }
   ],
-' "$psk" "$port" "$ports_json"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$ports_json"; build_socks5_json; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: tcp
@@ -1100,7 +1374,7 @@ listeners:
     transport: tcp
     maps:
 %s
-' "$psk" "$port" "$ports_yaml"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$ports_yaml"; build_socks5_yaml; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1122,7 +1396,7 @@ write_client_config_tcp() {
       "dial_timeout": 10
     }
   ],
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: tcp
@@ -1135,7 +1409,7 @@ paths:
     retry_interval: 3
     dial_timeout: 10
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1164,7 +1438,7 @@ write_server_config_ws() {
   "ws_settings": {
     "path": "%s"
   },
-' "$psk" "$port" "$ports_json" "$ws_path"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$ports_json" "$ws_path"; build_socks5_json; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: ws
@@ -1178,7 +1452,7 @@ listeners:
 ws_settings:
   path: "%s"
 
-' "$psk" "$port" "$ports_yaml" "$ws_path"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$ports_yaml" "$ws_path"; build_socks5_yaml; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1203,7 +1477,7 @@ write_client_config_ws() {
   "ws_settings": {
     "path": "%s"
   },
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: ws
@@ -1219,7 +1493,7 @@ paths:
 ws_settings:
   path: "%s"
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1250,7 +1524,7 @@ write_server_config_wss() {
   "ws_settings": {
     "path": "%s"
   },
-' "$psk" "$port" "$cert" "$key" "$ports_json" "$ws_path"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$cert" "$key" "$ports_json" "$ws_path"; build_socks5_json; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: wss
@@ -1266,12 +1540,12 @@ listeners:
 ws_settings:
   path: "%s"
 
-' "$psk" "$port" "$cert" "$key" "$ports_yaml" "$ws_path"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$cert" "$key" "$ports_yaml" "$ws_path"; build_socks5_yaml; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
 write_client_config_wss() {
-    local server_ip="$1" server_port="$2" psk="$3" ws_path="$4" tls_insecure="$5"
+    local server_ip="$1" server_port="$2" psk="$3" ws_path="$4"
     mkdir -p "$CONFIG_DIR"
     if [ "$CONFIG_FMT" = "json" ]; then
         {         printf '{
@@ -1291,8 +1565,7 @@ write_client_config_wss() {
   "ws_settings": {
     "path": "%s"
   },
-  "tls_insecure": %s,
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path" "$tls_insecure"; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: wss
@@ -1308,9 +1581,8 @@ paths:
 ws_settings:
   path: "%s"
 
-tls_insecure: %s
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path" "$tls_insecure"; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1340,7 +1612,7 @@ write_server_config_http() {
     "fake_domain": "%s",
     "path": "%s"
   },
-' "$psk" "$port" "$ports_json" "$http_domain" "$http_path"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$ports_json" "$http_domain" "$http_path"; build_socks5_json; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: http
@@ -1355,7 +1627,255 @@ http_settings:
   fake_domain: "%s"
   path: "%s"
 
-' "$psk" "$port" "$ports_yaml" "$http_domain" "$http_path"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$ports_yaml" "$http_domain" "$http_path"; build_socks5_yaml; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
+    fi
+}
+
+write_server_config_xhttp() {
+    local port="$1" psk="$2" path="$3" secure="$4" cert="$5" key="$6"
+    local cdn="$7" cdn_host="$8" cdn_port="$9" cdn_ips="${10}" insecure="${11}"
+    local pool="${12}" peer_ip="${13}"
+    shift 13
+    local ports_json ports_yaml transport edge_json edge_yaml peer_json peer_yaml
+    local cert_json cert_yaml
+
+    ports_json=$(build_ports_json "$@")
+    ports_yaml=$(build_ports_yaml "$@")
+    edge_json=$(build_edge_ips_json "$cdn_ips")
+    edge_yaml=$(build_edge_ips_yaml "$cdn_ips")
+    peer_json=$(build_edge_ips_json "$peer_ip")
+    peer_yaml=$(build_edge_ips_yaml "$peer_ip")
+
+    transport="xhttp"
+    [ "$secure" = "true" ] && transport="xhttps"
+    [ -z "$pool" ] && pool=4
+
+    cert_json=""
+    cert_yaml=""
+    if [ "$cdn" != "true" ] && [ "$secure" = "true" ]; then
+        cert_json=$(printf '\n  "cert_file": "%s",\n  "key_file": "%s",' "$cert" "$key")
+        cert_yaml=$(printf '\ncert_file: "%s"\nkey_file: "%s"' "$cert" "$key")
+    fi
+
+    mkdir -p "$CONFIG_DIR"
+    if [ "$CONFIG_FMT" = "json" ]; then
+        {
+        if [ "$cdn" = "true" ]; then
+            printf '{
+  "mode": "server",
+  "transport": "%s",
+  "psk": "%s",
+  "log_level": "info",
+  "listeners": [
+    {
+      "addr": "0.0.0.0:%s",
+      "connection_pool": %s,
+      "peer_ips": [%s],
+      "maps": [
+%s
+      ]
+    }
+  ],
+  "xhttp": {
+    "path": "%s",
+    "mode": "auto",
+    "allow_insecure_tls": %s,
+    "cdn": {
+      "enabled": true,
+      "host": "%s",
+      "port": %s,
+      "edge_ips": [%s]
+    }
+  },
+' "$transport" "$psk" "$port" "$pool" "$peer_json" "$ports_json" \
+  "$path" "$insecure" "$cdn_host" "$cdn_port" "$edge_json"
+        else
+            printf '{
+  "mode": "server",
+  "transport": "%s",
+  "psk": "%s",
+  "log_level": "info",%s
+  "listeners": [
+    {
+      "addr": "0.0.0.0:%s",
+      "maps": [
+%s
+      ]
+    }
+  ],
+  "xhttp": {
+    "path": "%s",
+    "mode": "auto"
+  },
+' "$transport" "$psk" "$cert_json" "$port" "$ports_json" "$path"
+        fi
+        build_socks5_json; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+    else
+        {
+        if [ "$cdn" = "true" ]; then
+            printf 'mode: server
+transport: %s
+psk: "%s"
+log_level: info
+listeners:
+  - addr: "0.0.0.0:%s"
+    connection_pool: %s
+    peer_ips: %s
+    maps:
+%s
+xhttp:
+  path: "%s"
+  mode: auto
+  allow_insecure_tls: %s
+  cdn:
+    enabled: true
+    host: "%s"
+    port: %s
+    edge_ips: %s
+
+' "$transport" "$psk" "$port" "$pool" "$peer_yaml" "$ports_yaml" \
+  "$path" "$insecure" "$cdn_host" "$cdn_port" "$edge_yaml"
+        else
+            printf 'mode: server
+transport: %s
+psk: "%s"
+log_level: info%s
+listeners:
+  - addr: "0.0.0.0:%s"
+    maps:
+%s
+xhttp:
+  path: "%s"
+  mode: auto
+
+' "$transport" "$psk" "$cert_yaml" "$port" "$ports_yaml" "$path"
+        fi
+        build_socks5_yaml; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
+    fi
+}
+
+write_client_config_xhttp() {
+    local server_ip="$1" server_port="$2" psk="$3" path="$4" mode="$5" secure="$6"
+    local insecure="$7" cdn="$8" cdn_host="$9" cdn_port="${10}" cdn_ips="${11}"
+    local origin_port="${12}" cert="${13}" key="${14}" public_ip="${15}"
+    local transport addr edge_json edge_yaml peer_json peer_yaml cert_json cert_yaml
+
+    transport="xhttp"
+    [ "$secure" = "true" ] && transport="xhttps"
+    edge_json=$(build_edge_ips_json "$cdn_ips")
+    edge_yaml=$(build_edge_ips_yaml "$cdn_ips")
+
+    addr="${server_ip}:${server_port}"
+    peer_json=$(build_edge_ips_json "$(echo "$server_ip" | xargs)")
+    peer_yaml=$(build_edge_ips_yaml "$(echo "$server_ip" | xargs)")
+
+    cert_json=""
+    cert_yaml=""
+    if [ "$cdn" = "true" ] && [ -n "$cert" ] && [ -n "$key" ]; then
+        cert_json=$(printf '\n  "cert_file": "%s",\n  "key_file": "%s",' "$cert" "$key")
+        cert_yaml=$(printf '\ncert_file: "%s"\nkey_file: "%s"' "$cert" "$key")
+    fi
+
+    mkdir -p "$CONFIG_DIR"
+    if [ "$CONFIG_FMT" = "json" ]; then
+        {
+        if [ "$cdn" = "true" ]; then
+            printf '{
+  "mode": "client",
+  "transport": "%s",
+  "psk": "%s",
+  "log_level": "info",%s
+  "paths": [
+    {
+      "addr": "%s",
+      "peer_ips": [%s],
+      "public_ip": "%s",
+      "retry_interval": 3,
+      "dial_timeout": 10
+    }
+  ],
+  "xhttp": {
+    "path": "%s",
+    "mode": "%s",
+    "allow_insecure_tls": %s,
+    "cdn": {
+      "enabled": true,
+      "origin_bind": "0.0.0.0:%s",
+      "host": "%s",
+      "port": %s,
+      "edge_ips": [%s]
+    }
+  },
+' "$transport" "$psk" "$cert_json" "$addr" "$peer_json" "$public_ip" \
+  "$path" "$mode" "$insecure" "$origin_port" "$cdn_host" "$cdn_port" "$edge_json"
+        else
+            printf '{
+  "mode": "client",
+  "transport": "%s",
+  "psk": "%s",
+  "log_level": "info",
+  "paths": [
+    {
+      "addr": "%s",
+      "connection_pool": %s,
+      "retry_interval": 3,
+      "dial_timeout": 10
+    }
+  ],
+  "xhttp": {
+    "path": "%s",
+    "mode": "%s",
+    "allow_insecure_tls": %s
+  },
+' "$transport" "$psk" "$addr" "$CLIENT_CONN_POOL" "$path" "$mode" "$insecure"
+        fi
+        build_advanced_json; printf '}\n'; } > "$CONFIG"
+    else
+        {
+        if [ "$cdn" = "true" ]; then
+            printf 'mode: client
+transport: %s
+psk: "%s"
+log_level: info%s
+paths:
+  - addr: "%s"
+    peer_ips: %s
+    public_ip: "%s"
+    retry_interval: 3
+    dial_timeout: 10
+
+xhttp:
+  path: "%s"
+  mode: "%s"
+  allow_insecure_tls: %s
+  cdn:
+    enabled: true
+    origin_bind: "0.0.0.0:%s"
+    host: "%s"
+    port: %s
+    edge_ips: %s
+
+' "$transport" "$psk" "$cert_yaml" "$addr" "$peer_yaml" "$public_ip" \
+  "$path" "$mode" "$insecure" "$origin_port" "$cdn_host" "$cdn_port" "$edge_yaml"
+        else
+            printf 'mode: client
+transport: %s
+psk: "%s"
+log_level: info
+paths:
+  - addr: "%s"
+    connection_pool: %s
+    retry_interval: 3
+    dial_timeout: 10
+
+xhttp:
+  path: "%s"
+  mode: "%s"
+  allow_insecure_tls: %s
+
+' "$transport" "$psk" "$addr" "$CLIENT_CONN_POOL" "$path" "$mode" "$insecure"
+        fi
+        build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1387,7 +1907,7 @@ write_server_config_https() {
     "fake_domain": "%s",
     "path": "%s"
   },
-' "$psk" "$port" "$cert" "$key" "$ports_json" "$http_domain" "$http_path"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$cert" "$key" "$ports_json" "$http_domain" "$http_path"; build_socks5_json; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: https
@@ -1404,12 +1924,12 @@ http_settings:
   fake_domain: "%s"
   path: "%s"
 
-' "$psk" "$port" "$cert" "$key" "$ports_yaml" "$http_domain" "$http_path"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$cert" "$key" "$ports_yaml" "$http_domain" "$http_path"; build_socks5_yaml; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
 write_client_config_https() {
-    local server_ip="$1" server_port="$2" psk="$3" http_domain="$4" http_path="$5" tls_insecure="$6"
+    local server_ip="$1" server_port="$2" psk="$3" http_domain="$4" http_path="$5"
     mkdir -p "$CONFIG_DIR"
     if [ "$CONFIG_FMT" = "json" ]; then
         {         printf '{
@@ -1430,8 +1950,7 @@ write_client_config_https() {
     "fake_domain": "%s",
     "path": "%s"
   },
-  "tls_insecure": %s,
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path" "$tls_insecure"; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: https
@@ -1448,9 +1967,8 @@ http_settings:
   fake_domain: "%s"
   path: "%s"
 
-tls_insecure: %s
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path" "$tls_insecure"; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1480,7 +1998,7 @@ write_server_config_quantum() {
     "mtu": %s,
     "block": "%s"
   },
-' "$psk" "$port" "$ports_json" "$mtu" "$block"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$ports_json" "$mtu" "$block"; build_socks5_json; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: quantum
@@ -1495,7 +2013,7 @@ quantum:
   mtu: %s
   block: "%s"
 
-' "$psk" "$port" "$ports_yaml" "$mtu" "$block"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$ports_yaml" "$mtu" "$block"; build_socks5_yaml; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1521,7 +2039,7 @@ write_client_config_quantum() {
     "mtu": %s,
     "block": "%s"
   },
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$mtu" "$block"; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$mtu" "$block"; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: quantum
@@ -1538,13 +2056,10 @@ quantum:
   mtu: %s
   block: "%s"
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$mtu" "$block"; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$mtu" "$block"; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
-# quantum+ (rawmux): KCP over UDP, dagMux core, FEC 10/1. Needs no extra
-# block -- rawmux/kcp defaults are applied by the binary. Config shape is
-# just like tcp but with transport "quantum+".
 write_server_config_quantumplus() {
     local port="$1" psk="$2"
     shift 2
@@ -1567,7 +2082,7 @@ write_server_config_quantumplus() {
       ]
     }
   ],
-' "$psk" "$port" "$ports_json"; build_socks5_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$ports_json"; build_socks5_json; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: "quantum+"
@@ -1578,7 +2093,7 @@ listeners:
     transport: "quantum+"
     maps:
 %s
-' "$psk" "$port" "$ports_yaml"; build_socks5_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$ports_yaml"; build_socks5_yaml; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1600,7 +2115,7 @@ write_client_config_quantumplus() {
       "dial_timeout": 10
     }
   ],
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: "quantum+"
@@ -1613,7 +2128,7 @@ paths:
     retry_interval: 3
     dial_timeout: 10
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1639,7 +2154,7 @@ write_client_config_http() {
     "fake_domain": "%s",
     "path": "%s"
   },
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: http
@@ -1656,7 +2171,7 @@ http_settings:
   fake_domain: "%s"
   path: "%s"
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1750,6 +2265,7 @@ write_server_config_tun() {
             printf '  },
 '
             build_socks5_json
+            build_dc_json
             build_advanced_json
             printf '}
 '
@@ -1822,6 +2338,7 @@ write_server_config_tun() {
 
 ' "${TUN_SOCK_BUF:-0}"
             build_socks5_yaml
+            build_dc_yaml
             build_advanced_yaml
         } > "$CONFIG"
     fi
@@ -1911,6 +2428,7 @@ write_client_config_tun() {
 ' "${TUN_SOCK_BUF:-0}"
             printf '  },
 '
+            build_dc_json
             build_advanced_json
             printf '}
 '
@@ -1984,6 +2502,7 @@ write_client_config_tun() {
             printf '  sock_buf: %s
 
 ' "${TUN_SOCK_BUF:-0}"
+            build_dc_yaml
             build_advanced_yaml
         } > "$CONFIG"
     fi
@@ -2065,11 +2584,10 @@ install_server() {
     ask_transport
     echo ""
 
-    # TUN never binds a listen socket: TunTransport.Listen ignores the address
-    # entirely and talks to the wire through pcap, so a port here would be a
-    # question with no effect. A placeholder keeps the config shape valid.
     if [ "$TRANSPORT" = "tun" ]; then
         PORT="8443"
+    elif [ "$TRANSPORT" = "xhttp" ] || [ "$TRANSPORT" = "xhttps" ]; then
+        :
     else
         ask PORT "Listen port" "8443"
         echo ""
@@ -2086,6 +2604,23 @@ install_server() {
         http|https)
             ask HTTP_DOMAIN "Fake domain  (e.g. www.google.com)" "www.google.com"
             ask HTTP_PATH   "Fake path    (e.g. /search)" "/search"
+            echo ""
+            ;;
+        xhttp|xhttps)
+            ask_xhttp server
+            if [ "$TRANSPORT" = "xhttps" ]; then
+                ask_xhttp_cdn server
+            else
+                XHTTP_CDN="false"; XHTTP_CDN_HOST=""; XHTTP_CDN_PORT="80"
+                XHTTP_CDN_IPS=""; XHTTP_INSECURE="true"; XHTTP_ORIGIN_PORT="8443"
+                XHTTP_PEER_IP=""; XHTTP_PUBLIC_IP=""; XHTTP_CDN_POOL="4"
+            fi
+            if [ "$XHTTP_CDN" = "true" ]; then
+                PORT="$XHTTP_CDN_PORT"
+            else
+                echo ""
+                ask PORT "Listen port" "8443"
+            fi
             echo ""
             ;;
         quantum)
@@ -2118,7 +2653,6 @@ install_server() {
                 6|bip)  TUN_PROFILE="bip"  ;;
                 *)      TUN_PROFILE="tcp"  ;;
             esac
-            # 'encapsulation' is vestigial in the engine — 'profile' drives everything.
             TUN_ENCAP="ipx"
             TUN_L4_PORT=""
             if [ "$TUN_PROFILE" = "tcp" ] || [ "$TUN_PROFILE" = "udp" ]; then
@@ -2160,8 +2694,9 @@ install_server() {
             ;;
     esac
 
-    if [ "$TRANSPORT" = "wss" ] || [ "$TRANSPORT" = "https" ]; then
-        ask_ssl_server
+    if [ "$TRANSPORT" = "wss" ] || [ "$TRANSPORT" = "https" ] ||
+       { [ "$TRANSPORT" = "xhttps" ] && [ "$XHTTP_CDN" != "true" ]; }; then
+        ask_ssl_cert
         echo ""
     fi
 
@@ -2171,6 +2706,7 @@ install_server() {
     ask_socks5
     echo ""
 
+    ask_dc
     ask_advanced
     echo ""
 
@@ -2182,6 +2718,12 @@ install_server() {
         https)   write_server_config_https   "$PORT" "$PSK" "$HTTP_DOMAIN" "$HTTP_PATH" "$CERT_FILE" "$KEY_FILE" "${PORTS[@]}" ;;
         quantum) write_server_config_quantum "$PORT" "$PSK" "$QM_MTU" "$QM_BLOCK" "${PORTS[@]}" ;;
         quantum+) write_server_config_quantumplus "$PORT" "$PSK" "${PORTS[@]}" ;;
+        xhttp)   write_server_config_xhttp   "$PORT" "$PSK" "$XHTTP_PATH" "false" "" "" \
+                     "$XHTTP_CDN" "$XHTTP_CDN_HOST" "$XHTTP_CDN_PORT" "$XHTTP_CDN_IPS" "$XHTTP_INSECURE" \
+                     "$XHTTP_CDN_POOL" "$XHTTP_PEER_IP" "${PORTS[@]}" ;;
+        xhttps)  write_server_config_xhttp   "$PORT" "$PSK" "$XHTTP_PATH" "true" "$CERT_FILE" "$KEY_FILE" \
+                     "$XHTTP_CDN" "$XHTTP_CDN_HOST" "$XHTTP_CDN_PORT" "$XHTTP_CDN_IPS" "$XHTTP_INSECURE" \
+                     "$XHTTP_CDN_POOL" "$XHTTP_PEER_IP" "${PORTS[@]}" ;;
         tun)     write_server_config_tun     "$PORT" "$PSK" "$TUN_LOCAL_IP" "$TUN_PEER_IP" "$TUN_LOCAL_ADDR" "$TUN_REMOTE_ADDR" "$TUN_ENCAP" "$TUN_PROFILE" "$TUN_IFACE" "$TUN_SPOOF_SRC" "$TUN_SPOOF_DST" "$TUN_DCPI" "$TUN_NAME" "$TUN_HEARTBEAT_SEC" "$TUN_IDLE_TIMEOUT_SEC" "${PORTS[@]}" ;;
     esac
     ok "Config written: ${CONFIG}"
@@ -2228,6 +2770,28 @@ install_server() {
         echo -e "  Core      : ${BOLD}rawmux (dagMux, FEC 10/1)${NC}"
         echo -e "  ${YELLOW}Open UDP ${PORT} AND UDP $((PORT + 10000)) (knock port) in your firewall.${NC}"
     fi
+    if [ "$TRANSPORT" = "xhttp" ] || [ "$TRANSPORT" = "xhttps" ]; then
+        echo -e "  URL path  : ${BOLD}${XHTTP_PATH}${NC}  ${DIM}(the other side must use the same one)${NC}"
+        if [ "$XHTTP_CDN" = "true" ]; then
+            echo -e "  Cloudflare: ${BOLD}on — this side dials OUT${NC}"
+            echo -e "  Domain    : ${BOLD}${XHTTP_CDN_HOST}${NC}  ${DIM}(this is what decides where traffic goes)${NC}"
+            echo -e "  CF port   : ${BOLD}${XHTTP_CDN_PORT}${NC}"
+            echo -e "  Edge IPs  : ${BOLD}${XHTTP_CDN_IPS}${NC}  ${DIM}(tried in this order)${NC}"
+            echo -e "  ${DIM}Nothing needs opening in this firewall — this side only dials out.${NC}"
+            echo -e "  ${DIM}The far side must be running and reachable through Cloudflare.${NC}"
+        fi
+        if [ "$TRANSPORT" = "xhttps" ] && [ "$XHTTP_CDN" != "true" ]; then
+            echo -e "  SSL Mode  : ${BOLD}${SSL_MODE}${NC}"
+            [ "$SSL_MODE" = "auto" ] && echo -e "  Domain    : ${BOLD}${DOMAIN}${NC}"
+            echo -e "  Cert      : ${BOLD}${CERT_FILE}${NC}"
+        fi
+        echo ""
+        echo -e "  ${DIM}To put this behind Cloudflare: point a proxied (orange cloud) domain${NC}"
+        echo -e "  ${DIM}at this server, and make sure port ${PORT} is one Cloudflare forwards${NC}"
+        echo -e "  ${DIM}(HTTPS: 443, 2053, 2083, 2087, 2096, 8443).${NC}"
+        echo -e "  ${DIM}Anything that is not a tunnel request gets a plain 404 page, so the${NC}"
+        echo -e "  ${DIM}domain looks like an ordinary website to anyone who probes it.${NC}"
+    fi
     if [ "$TRANSPORT" = "tun" ]; then
         echo -e "  Encap     : ${BOLD}${TUN_ENCAP}${NC}"
         echo -e "  Profile   : ${BOLD}${TUN_PROFILE}${NC}"
@@ -2263,16 +2827,14 @@ install_client() {
     ask_transport
     echo ""
 
-    if [ "$TRANSPORT" != "tun" ]; then
+    if [ "$TRANSPORT" != "tun" ] && [ "$TRANSPORT" != "xhttp" ] && [ "$TRANSPORT" != "xhttps" ]; then
         ask_connection_pool
     fi
 
-    # For TUN the server is identified by its REAL IP, which is asked below as
-    # "Server real IP" -- and the transport never dials a port, so asking for
-    # IP:PORT here would be both redundant and misleading. The placeholder port
-    # only keeps the generated config's addr field well-formed.
     if [ "$TRANSPORT" = "tun" ]; then
         SERVER_PORT="8443"
+    elif [ "$TRANSPORT" = "xhttp" ] || [ "$TRANSPORT" = "xhttps" ]; then
+        :
     else
         while true; do
             echo -e "        Example : 1.1.1.1:8443"
@@ -2299,6 +2861,56 @@ install_client() {
         http|https)
             ask HTTP_DOMAIN "Fake domain  (must match server)" "www.google.com"
             ask HTTP_PATH   "Fake path    (must match server)" "/search"
+            echo ""
+            ;;
+        xhttp|xhttps)
+            ask_xhttp client
+            if [ "$TRANSPORT" = "xhttps" ]; then
+                ask_xhttp_cdn client
+            else
+                XHTTP_CDN="false"; XHTTP_CDN_HOST=""; XHTTP_CDN_PORT="80"
+                XHTTP_CDN_IPS=""; XHTTP_INSECURE="true"; XHTTP_ORIGIN_PORT="8443"
+                XHTTP_PEER_IP=""; XHTTP_PUBLIC_IP=""; XHTTP_CDN_POOL="4"
+            fi
+            if [ "$XHTTP_CDN" = "true" ]; then
+                echo ""
+                while true; do
+                    ask_required SERVER_IP "Server IP"
+                    if ! validate_ip "$SERVER_IP"; then
+                        warn "That is not an IP address."
+                        continue
+                    fi
+                    if [ -n "$XHTTP_PUBLIC_IP" ] && [ "$SERVER_IP" = "$XHTTP_PUBLIC_IP" ]; then
+                        warn "That is the same as the Client IP (${XHTTP_PUBLIC_IP})."
+                        warn "These are two different servers — one of the two is wrong."
+                        continue
+                    fi
+                    break
+                done
+                echo ""
+                ok "Client IP : ${XHTTP_PUBLIC_IP:-not stated}"
+                ok "Server IP : ${SERVER_IP}"
+                SERVER_PORT="$XHTTP_ORIGIN_PORT"
+                CLIENT_CONN_POOL=4
+
+                echo ""
+                echo -e "  ${BOLD}Certificate for Cloudflare to connect to${NC}"
+                ask_ssl_cert
+            else
+                echo ""
+                ask_connection_pool
+                while true; do
+                    echo -e "        Example : 1.1.1.1:8443"
+                    ask SERVER_ADDR "Server IP And Port" ""
+                    SERVER_IP="${SERVER_ADDR%%:*}"
+                    SERVER_PORT="${SERVER_ADDR##*:}"
+                    if [ -z "$SERVER_IP" ] || [ -z "$SERVER_PORT" ] || [ "$SERVER_IP" = "$SERVER_PORT" ]; then
+                        warn "Invalid format. Use IP:PORT (e.g. 1.1.1.1:8443)"
+                    else
+                        break
+                    fi
+                done
+            fi
             echo ""
             ;;
         quantum)
@@ -2362,21 +2974,27 @@ install_client() {
     esac
 
     if [ "$TRANSPORT" = "wss" ] || [ "$TRANSPORT" = "https" ]; then
-        ask_ssl_client
         echo ""
     fi
 
+    ask_dc
     ask_advanced
     echo ""
 
     case "$TRANSPORT" in
         tcp)     write_client_config_tcp     "$SERVER_IP" "$SERVER_PORT" "$PSK" ;;
         ws)      write_client_config_ws      "$SERVER_IP" "$SERVER_PORT" "$PSK" "$WS_PATH" ;;
-        wss)     write_client_config_wss     "$SERVER_IP" "$SERVER_PORT" "$PSK" "$WS_PATH" "$TLS_INSECURE" ;;
+        wss)     write_client_config_wss     "$SERVER_IP" "$SERVER_PORT" "$PSK" "$WS_PATH" ;;
         http)    write_client_config_http    "$SERVER_IP" "$SERVER_PORT" "$PSK" "$HTTP_DOMAIN" "$HTTP_PATH" ;;
-        https)   write_client_config_https   "$SERVER_IP" "$SERVER_PORT" "$PSK" "$HTTP_DOMAIN" "$HTTP_PATH" "$TLS_INSECURE" ;;
+        https)   write_client_config_https   "$SERVER_IP" "$SERVER_PORT" "$PSK" "$HTTP_DOMAIN" "$HTTP_PATH" ;;
         quantum) write_client_config_quantum "$SERVER_IP" "$SERVER_PORT" "$PSK" "$QM_MTU" "$QM_BLOCK" ;;
         quantum+) write_client_config_quantumplus "$SERVER_IP" "$SERVER_PORT" "$PSK" ;;
+        xhttp)   write_client_config_xhttp   "$SERVER_IP" "$SERVER_PORT" "$PSK" "$XHTTP_PATH" "$XHTTP_MODE" "false" \
+                     "$XHTTP_INSECURE" "$XHTTP_CDN" "$XHTTP_CDN_HOST" "$XHTTP_CDN_PORT" "$XHTTP_CDN_IPS" \
+                     "$XHTTP_ORIGIN_PORT" "$CERT_FILE" "$KEY_FILE" "$XHTTP_PUBLIC_IP" ;;
+        xhttps)  write_client_config_xhttp   "$SERVER_IP" "$SERVER_PORT" "$PSK" "$XHTTP_PATH" "$XHTTP_MODE" "true" \
+                     "$XHTTP_INSECURE" "$XHTTP_CDN" "$XHTTP_CDN_HOST" "$XHTTP_CDN_PORT" "$XHTTP_CDN_IPS" \
+                     "$XHTTP_ORIGIN_PORT" "$CERT_FILE" "$KEY_FILE" "$XHTTP_PUBLIC_IP" ;;
         tun)     write_client_config_tun     "$SERVER_PORT" "$PSK" "$TUN_LOCAL_IP" "$TUN_PEER_IP" "$TUN_LOCAL_ADDR" "$TUN_REMOTE_ADDR" "$TUN_ENCAP" "$TUN_PROFILE" "$TUN_IFACE" "$TUN_SPOOF_SRC" "$TUN_SPOOF_DST" "$TUN_DCPI" "$TUN_NAME" "$TUN_HEARTBEAT_SEC" "$TUN_IDLE_TIMEOUT_SEC" ;;
     esac
     ok "Config written: ${CONFIG}"
@@ -2392,8 +3010,6 @@ install_client() {
     echo -e "  Version   : ${BOLD}${VERSION}${NC}"
     echo -e "  Transport : ${BOLD}${TRANSPORT}${NC}"
     if [ "$TRANSPORT" = "tun" ]; then
-        # No port is involved on this transport; showing one would invite the
-        # user to "fix" a firewall rule that does not exist.
         echo -e "  Server    : ${BOLD}${TUN_PEER_IP}${NC}  ${DIM}(tun — no listen port)${NC}"
     else
         echo -e "  Server    : ${BOLD}${SERVER_IP}:${SERVER_PORT}${NC}"
@@ -2402,7 +3018,6 @@ install_client() {
     [ "$TRANSPORT" = "ws"  ] && echo -e "  WS Path   : ${BOLD}${WS_PATH}${NC}"
     if [ "$TRANSPORT" = "wss" ]; then
         echo -e "  WS Path   : ${BOLD}${WS_PATH}${NC}"
-        echo -e "  TLS Verify: ${BOLD}$([ "$TLS_INSECURE" = "true" ] && echo "Skipped" || echo "Enabled")${NC}"
     fi
     if [ "$TRANSPORT" = "http" ]; then
         echo -e "  Fake Domain : ${BOLD}${HTTP_DOMAIN}${NC}"
@@ -2411,12 +3026,28 @@ install_client() {
     if [ "$TRANSPORT" = "https" ]; then
         echo -e "  Fake Domain : ${BOLD}${HTTP_DOMAIN}${NC}"
         echo -e "  Fake Path   : ${BOLD}${HTTP_PATH}${NC}"
-        echo -e "  TLS Verify  : ${BOLD}$([ "$TLS_INSECURE" = "true" ] && echo "Skipped" || echo "Enabled")${NC}"
     fi
     if [ "$TRANSPORT" = "quantum" ]; then
         echo -e "  Interface : ${BOLD}auto-detect${NC}"
         echo -e "  MTU       : ${BOLD}${QM_MTU}${NC}"
         echo -e "  Block     : ${BOLD}${QM_BLOCK}${NC}"
+    fi
+    if [ "$TRANSPORT" = "xhttp" ] || [ "$TRANSPORT" = "xhttps" ]; then
+        echo -e "  URL path  : ${BOLD}${XHTTP_PATH}${NC}"
+        echo -e "  Upload    : ${BOLD}${XHTTP_MODE}${NC}"
+        if [ "$XHTTP_CDN" = "true" ]; then
+            echo -e "  Route     : ${BOLD}Cloudflare — this side is the ORIGIN${NC}"
+            echo -e "  Waiting on: ${BOLD}0.0.0.0:${XHTTP_ORIGIN_PORT}${NC}"
+            echo ""
+            echo -e "  ${YELLOW}Two things must be true for this to work:${NC}"
+            echo -e "  ${DIM}1. Your domain's DNS record points at THIS server, orange cloud on.${NC}"
+            echo -e "  ${DIM}2. Port ${XHTTP_ORIGIN_PORT} is open in this firewall so Cloudflare can reach it.${NC}"
+            echo ""
+            echo -e "  ${DIM}This side no longer dials anywhere — the Iran server opens the${NC}"
+            echo -e "  ${DIM}connection to a Cloudflare address, and Cloudflare brings it here.${NC}"
+        else
+            echo -e "  Route     : ${BOLD}direct to the server${NC}"
+        fi
     fi
     echo -e "  Config    : ${BOLD}${CONFIG}${NC}"
     echo ""
@@ -2691,6 +3322,10 @@ pause() {
     echo -ne "${YELLOW}?${NC} Press Enter to return to the menu: "
     read -r _
 }
+
+if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
+    return 0 2>/dev/null || true
+fi
 
 [ "$EUID" -ne 0 ] && { echo -e "${RED}[ERR ]${NC}  Run as root: sudo bash setup.sh"; exit 1; }
 
