@@ -1758,12 +1758,10 @@ write_client_config_xhttp() {
     local server_ip="$1" server_port="$2" psk="$3" path="$4" mode="$5" secure="$6"
     local insecure="$7" cdn="$8" cdn_host="$9" cdn_port="${10}" cdn_ips="${11}"
     local origin_port="${12}" cert="${13}" key="${14}" public_ip="${15}"
-    local transport addr edge_json edge_yaml peer_json peer_yaml cert_json cert_yaml
+    local transport addr peer_json peer_yaml cert_json cert_yaml
 
     transport="xhttp"
     [ "$secure" = "true" ] && transport="xhttps"
-    edge_json=$(build_edge_ips_json "$cdn_ips")
-    edge_yaml=$(build_edge_ips_yaml "$cdn_ips")
 
     addr="${server_ip}:${server_port}"
     peer_json=$(build_edge_ips_json "$(echo "$server_ip" | xargs)")
@@ -1797,17 +1795,13 @@ write_client_config_xhttp() {
   "xhttp": {
     "path": "%s",
     "mode": "%s",
-    "allow_insecure_tls": %s,
     "cdn": {
       "enabled": true,
-      "origin_bind": "0.0.0.0:%s",
-      "host": "%s",
-      "port": %s,
-      "edge_ips": [%s]
+      "origin_bind": "0.0.0.0:%s"
     }
   },
 ' "$transport" "$psk" "$cert_json" "$addr" "$peer_json" "$public_ip" \
-  "$path" "$mode" "$insecure" "$origin_port" "$cdn_host" "$cdn_port" "$edge_json"
+  "$path" "$mode" "$origin_port"
         else
             printf '{
   "mode": "client",
@@ -1829,7 +1823,7 @@ write_client_config_xhttp() {
   },
 ' "$transport" "$psk" "$addr" "$CLIENT_CONN_POOL" "$path" "$mode" "$insecure"
         fi
-        build_advanced_json; printf '}\n'; } > "$CONFIG"
+        build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
         {
         if [ "$cdn" = "true" ]; then
@@ -1847,16 +1841,12 @@ paths:
 xhttp:
   path: "%s"
   mode: "%s"
-  allow_insecure_tls: %s
   cdn:
     enabled: true
     origin_bind: "0.0.0.0:%s"
-    host: "%s"
-    port: %s
-    edge_ips: %s
 
 ' "$transport" "$psk" "$cert_yaml" "$addr" "$peer_yaml" "$public_ip" \
-  "$path" "$mode" "$insecure" "$origin_port" "$cdn_host" "$cdn_port" "$edge_yaml"
+  "$path" "$mode" "$origin_port"
         else
             printf 'mode: client
 transport: %s
@@ -1875,7 +1865,7 @@ xhttp:
 
 ' "$transport" "$psk" "$addr" "$CLIENT_CONN_POOL" "$path" "$mode" "$insecure"
         fi
-        build_advanced_yaml; } > "$CONFIG"
+        build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
 }
 
