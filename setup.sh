@@ -50,22 +50,22 @@ hr()    { echo -e "\n${BOLD}${CYAN}══ $* ══${NC}"; }
 
 ensure_runtime_dependencies() {
     local missing=0 cmd
-    for cmd in curl od cmp wc; do
+    for cmd in curl od cmp wc python3; do
         command -v "$cmd" >/dev/null 2>&1 || missing=1
     done
     [ "$missing" -eq 0 ] && return 0
 
-    info "Installing launcher download dependencies..."
+    info "Installing launcher download and version-list dependencies..."
     if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq && apt-get install -y -qq ca-certificates curl coreutils
+        apt-get update -qq && apt-get install -y -qq ca-certificates curl coreutils python3
     elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y -q ca-certificates curl coreutils
+        dnf install -y -q ca-certificates curl coreutils python3
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y -q ca-certificates curl coreutils
+        yum install -y -q ca-certificates curl coreutils python3
     else
-        error "Missing curl/coreutils and no supported package manager was found."
+        error "Missing curl/coreutils/python3 and no supported package manager was found."
     fi
-    for cmd in curl od cmp wc; do
+    for cmd in curl od cmp wc python3; do
         command -v "$cmd" >/dev/null 2>&1 || error "Required command is still missing after installation: ${cmd}"
     done
 }
@@ -712,44 +712,72 @@ update_launcher() {
     fi
 }
 
+parse_version_list() {
+    python3 -c '
+import json, re, sys
+try:
+    data = json.load(sys.stdin)
+    if not isinstance(data, dict) or data.get("ok") is False:
+        raise ValueError("version service returned an error")
+    channels = data.get("channels", data)
+    if not isinstance(channels, dict):
+        raise ValueError("invalid channels object")
+    rows = []
+    for channel in ("release", "beta"):
+        entry = channels.get(channel, [])
+        versions = entry.get("versions", []) if isinstance(entry, dict) else entry
+        if not isinstance(versions, list):
+            raise ValueError("invalid versions array")
+        for version in versions:
+            if isinstance(version, str) and re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", version):
+                row = channel + "\t" + version
+                if row not in rows:
+                    rows.append(row)
+    print("\n".join(rows))
+except (ValueError, TypeError) as exc:
+    print("Cannot parse version list: " + str(exc), file=sys.stderr)
+    sys.exit(1)
+'
+}
+
 ask_version() {
     local role="$1"
-    local cmd="/usr/local/bin/DaggerLauncher --list-versions --role ${role}"
 
     echo ""
     info "Fetching available versions..."
 
-    local json
-    json=$($cmd 2>/dev/null)
-
-    local labels=() chans=() vers=()
-
-    if [ -n "$json" ]; then
-        local releases betas
-
-        releases=$(echo "$json" | grep -oP '"release"\s*:\s*\[\K[^\]]*' | grep -oP '"[^"]*"' | tr -d '"')
-        betas=$(echo "$json" | grep -oP '"beta"\s*:\s*\[\K[^\]]*' | grep -oP '"[^"]*"' | tr -d '"')
-
-        while IFS= read -r t; do
-            [ -z "$t" ] && continue
-            labels+=("${t}  (release)")
-            chans+=("release")
-            vers+=("$t")
-        done <<< "$releases"
-
-        while IFS= read -r t; do
-            [ -z "$t" ] && continue
-            labels+=("${t}  (beta)")
-            chans+=("beta")
-            vers+=("$t")
-        done <<< "$betas"
-    fi
-
-    if [ "${#labels[@]}" -eq 0 ]; then
-        warn "Could not fetch a version list -- falling back to manual entry."
+    local json rows channel version
+    # Preserve stderr: an HTTP/TLS/launcher error is not an empty release list.
+    if ! json=$("$LAUNCHER" --list-versions --role "$role"); then
+        warn "Launcher could not retrieve versions for role=${role}; see the error above."
         ask_channel_manual
         return
     fi
+    if ! rows=$(printf '%s' "$json" | parse_version_list); then
+        warn "Version-list parsing failed; falling back to manual entry."
+        ask_channel_manual
+        return
+    fi
+
+    local labels=() chans=() vers=()
+
+    while IFS=$'\t' read -r channel version; do
+        version="${version%$'\r'}"
+        [ -n "$version" ] || continue
+        labels+=("${version}  (${channel})")
+        chans+=("$channel")
+        vers+=("$version")
+    done <<< "$rows"
+
+    if [ "${#labels[@]}" -eq 0 ]; then
+        warn "The service returned no published versions; check its releases directory. Falling back to manual entry."
+        ask_channel_manual
+        return
+    fi
+
+    labels=("latest  (release — resolve on each start)" "latest  (beta — resolve on each start)" "${labels[@]}")
+    chans=("release" "beta" "${chans[@]}")
+    vers=("latest" "latest" "${vers[@]}")
 
     echo ""
     echo -e "  ${BOLD}Available versions:${NC}"
@@ -781,6 +809,7 @@ ask_version() {
     done
 
     info "Selected : ${VERSION} (${CHANNEL})"
+    info "A numbered version stays pinned. 'latest' is resolved when the service starts, not while it is running."
 }
 
 ask_channel_manual() {
@@ -818,9 +847,9 @@ ask_channel_manual() {
 }
 
 switch_channel() {
-    hr "Switch Release Channel / Version"
+    hr "Update Core / Select Version"
     echo ""
-    pick_service "Switch channel for" || return 0
+    pick_service "Update core for" || return 0
     local svc="${PICKED_SVC%.service}"
     local svc_file="/etc/systemd/system/${PICKED_SVC}"
 
@@ -853,9 +882,15 @@ switch_channel() {
     local new_channel="$CHANNEL" new_version="$VERSION"
 
     if [ "$new_channel" = "$cur_channel" ] && [ "$new_version" = "$cur_version" ]; then
-        ok "Already on channel=${cur_channel} version=${cur_version}. Nothing to do."
-        return 0
+        info "Same version selection: restarting will fetch and verify it again (latest will be resolved again)."
     fi
+    warn "Applying this selection restarts the selected service and briefly interrupts its connections."
+    local apply_core=""
+    ask apply_core "Apply channel=${new_channel} version=${new_version} and restart now? (y/n)" "n"
+    case "$apply_core" in
+        y|Y) ;;
+        *) info "Cancelled; service and version selection left unchanged."; return 0 ;;
+    esac
 
     set_unit_env() {
         local key="$1" val="$2"
@@ -874,7 +909,8 @@ switch_channel() {
     systemctl restart "$svc"
     sleep 2
     if systemctl is-active --quiet "$svc"; then
-        ok "Now running on channel=${new_channel} version=${new_version}."
+        ok "Service is active with channel=${new_channel} version=${new_version}."
+        info "Check its startup log for 'launcher: fetched version=' and tunnel readiness; active alone does not confirm a working tunnel."
     else
         warn "Service failed to start on the new setting -- reverting. Logs:"
         journalctl -u "$svc" -n 20 --no-pager
@@ -882,6 +918,7 @@ switch_channel() {
         set_unit_env DC_VERSION "$cur_version"
         systemctl daemon-reload
         systemctl restart "$svc"
+        warn "Previous version selection restored. 'latest' or a replaced same-version artifact cannot roll back to the previous binary automatically."
     fi
 }
 
@@ -1002,7 +1039,6 @@ ask_socks5() {
 
 ADV_AUTO_TUNE="true"
 TUN_TUNE_PROFILE="auto"
-TUN_ENCRYPT="true"
 TUN_MTU=""
 TUN_SOCK_BUF=""
 TUN_RX_QUEUE=""
@@ -1149,26 +1185,8 @@ ask_tun_profile() {
     esac
 
     echo ""
-    echo -e "  ${BOLD}Encrypt tunnel payload (AES-GCM):${NC}"
-    echo -e "  ${DIM}ON  = each packet is sealed. Costs ~0.6us/packet, i.e. a ceiling${NC}"
-    echo -e "  ${DIM}      around 7 Gbit/s on one core -- not what limits a real link.${NC}"
-    echo -e "  ${DIM}OFF = fastest possible, but the tunnel carries plaintext IP:${NC}"
-    echo -e "  ${DIM}      anyone on the path can read and modify it, and DPI can${NC}"
-    echo -e "  ${DIM}      classify it directly. Only for a trusted path.${NC}"
-    echo ""
-    ask TUN_ENC_CHOICE "Enable encryption (y/n)" "y"
-    case "$TUN_ENC_CHOICE" in
-        n|N|no|NO) TUN_ENCRYPT="false" ;;
-        *)         TUN_ENCRYPT="true"  ;;
-    esac
-
-    echo ""
-    if [ "$TUN_ENCRYPT" = "true" ]; then
-        info "TUN Profile : ${TUN_TUNE_PROFILE}  |  encryption: on"
-    else
-        warn "TUN Profile : ${TUN_TUNE_PROFILE}  |  encryption: OFF - traffic is readable on the path"
-    fi
-    warn "Use the SAME profile and encryption setting on BOTH ends."
+    info "TUN Profile : ${TUN_TUNE_PROFILE}  |  encryption: on (required)"
+    warn "Use the SAME TUN profile on BOTH ends."
 }
 
 ask_advanced() {
@@ -2363,8 +2381,8 @@ write_server_config_tun() {
 '    "$remote_addr"
             printf '    "profile": "%s",
 ' "$TUN_TUNE_PROFILE"
-            printf '    "encrypt": %s,
-' "$TUN_ENCRYPT"
+            printf '    "encrypt": true,
+'
             [ -n "$TUN_MTU"        ] && printf '    "mtu": %s,
 ' "$TUN_MTU"
             [ -n "$TUN_RX_QUEUE"   ] && printf '    "rx_queue": %s,
@@ -2438,8 +2456,8 @@ write_server_config_tun() {
 '   "$remote_addr"
             printf '  profile: "%s"
 ' "$TUN_TUNE_PROFILE"
-            printf '  encrypt: %s
-' "$TUN_ENCRYPT"
+            printf '  encrypt: true
+'
             [ -n "$TUN_MTU"        ] && printf '  mtu: %s
 ' "$TUN_MTU"
             [ -n "$TUN_RX_QUEUE"   ] && printf '  rx_queue: %s
@@ -2527,8 +2545,8 @@ write_client_config_tun() {
 '    "$remote_addr"
             printf '    "profile": "%s",
 ' "$TUN_TUNE_PROFILE"
-            printf '    "encrypt": %s,
-' "$TUN_ENCRYPT"
+            printf '    "encrypt": true,
+'
             [ -n "$TUN_MTU"        ] && printf '    "mtu": %s,
 ' "$TUN_MTU"
             [ -n "$TUN_RX_QUEUE"   ] && printf '    "rx_queue": %s,
@@ -2603,8 +2621,8 @@ write_client_config_tun() {
 '   "$remote_addr"
             printf '  profile: "%s"
 ' "$TUN_TUNE_PROFILE"
-            printf '  encrypt: %s
-' "$TUN_ENCRYPT"
+            printf '  encrypt: true
+'
             [ -n "$TUN_MTU"        ] && printf '  mtu: %s
 ' "$TUN_MTU"
             [ -n "$TUN_RX_QUEUE"   ] && printf '  rx_queue: %s
@@ -3448,7 +3466,7 @@ show_menu() {
     echo ""
     echo -e "  ${BOLD}Other${NC}"
     echo "    8)  Remove"
-    echo "    9)  Switch Release Channel  (release / beta + version)"
+    echo "    9)  Update Core / Select Version  (latest / pinned, release / beta)"
     echo "   10)  Update Launcher"
     echo "    0)  Exit"
     echo ""
