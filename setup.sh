@@ -10,6 +10,7 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 LAUNCHER="/usr/local/bin/DaggerLauncher"
+LAUNCHER_LATEST_URL="https://github.com/itsFLoKi/daggerConnect/releases/latest/download/DaggerLauncher"
 CONFIG_DIR="/etc/DaggerConnect"
 CONFIG=""
 CONFIG_FMT=""
@@ -24,7 +25,12 @@ XHTTP_INSECURE="true"
 XHTTP_ORIGIN_PORT="8443"
 XHTTP_PEER_IP=""
 XHTTP_PUBLIC_IP=""
-XHTTP_CDN_POOL="4"
+XHTTP_CDN_POOL="6"
+XHTTP_UP_MAX_BYTES="65536"
+XHTTP_BUFFER_BYTES="32768"
+XHTTP_PROBE_MS="8000"
+XHTTP_SOCKET_BUF_BYTES="131072"
+PER_CONNECTION_POOL="6"
 CHANNEL=""
 VERSION=""
 SERVER_PUBLIC_IP=""
@@ -41,6 +47,28 @@ step()  { echo -e "${DIM}$(_ts)${NC} ${MAGENTA}[STEP]${NC}  $*"; }
 
 error() { echo -e "${DIM}$(_ts)${NC} ${RED}[ERR ]${NC}  $*"; exit 1; }
 hr()    { echo -e "\n${BOLD}${CYAN}══ $* ══${NC}"; }
+
+ensure_runtime_dependencies() {
+    local missing=0 cmd
+    for cmd in curl od cmp wc; do
+        command -v "$cmd" >/dev/null 2>&1 || missing=1
+    done
+    [ "$missing" -eq 0 ] && return 0
+
+    info "Installing launcher download dependencies..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq && apt-get install -y -qq ca-certificates curl coreutils
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y -q ca-certificates curl coreutils
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y -q ca-certificates curl coreutils
+    else
+        error "Missing curl/coreutils and no supported package manager was found."
+    fi
+    for cmd in curl od cmp wc; do
+        command -v "$cmd" >/dev/null 2>&1 || error "Required command is still missing after installation: ${cmd}"
+    done
+}
 
 ask() {
     local var="$1" prompt="$2" default="$3"
@@ -320,7 +348,7 @@ ask_xhttp_cdn() {
     echo -e "  ${BOLD}How many connections should it keep open?${NC}"
     echo -e "  ${DIM}In Cloudflare mode this side dials, so the pool lives here.${NC}"
     echo ""
-    ask XHTTP_CDN_POOL "Connections" "4"
+    ask XHTTP_CDN_POOL "Connections" "6"
     case "$XHTTP_CDN_POOL" in
         ''|*[!0-9]*) XHTTP_CDN_POOL="4" ;;
     esac
@@ -554,23 +582,23 @@ check_ptrace_scope() {
 }
 
 tune_network() {
-    hr "Network Tuning (fq + BBR, big buffers)"
+    hr "Network Tuning (fq + BBR, bounded buffers)"
 
     local sysctl_file="/etc/sysctl.d/99-daggerconnect-net.conf"
     step "Writing ${sysctl_file}"
     cat > "$sysctl_file" << 'EOF'
 # DaggerConnect network tuning -- managed by setup.sh (safe to keep).
-net.core.rmem_max = 67108864
-net.core.wmem_max = 67108864
-net.core.rmem_default = 16777216
-net.core.wmem_default = 16777216
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
 net.core.optmem_max = 65536
-net.core.netdev_max_backlog = 250000
-net.core.somaxconn = 8192
+net.core.netdev_max_backlog = 8192
+net.core.somaxconn = 4096
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
-net.ipv4.tcp_rmem = 4096 131072 67108864
-net.ipv4.tcp_wmem = 4096 131072 67108864
+net.ipv4.tcp_rmem = 4096 131072 16777216
+net.ipv4.tcp_wmem = 4096 131072 16777216
 net.ipv4.udp_rmem_min = 131072
 net.ipv4.udp_wmem_min = 131072
 net.ipv4.tcp_mtu_probing = 1
@@ -600,43 +628,59 @@ EOF
     echo ""
 }
 
-ensure_launcher() {
-    local role="$1"
-    if [ -f "$LAUNCHER" ]; then
-        chmod +x "$LAUNCHER"
+download_latest_launcher() {
+    local tmp magic size
+    mkdir -p "$(dirname "$LAUNCHER")"
+    tmp=$(mktemp "${LAUNCHER}.XXXXXX")
+
+    if ! curl --fail --silent --show-error --location \
+        --retry 3 --retry-delay 2 --retry-connrefused \
+        --connect-timeout 15 --max-time 180 \
+        -o "$tmp" "$LAUNCHER_LATEST_URL"; then
+        rm -f "$tmp"
+        return 1
+    fi
+
+    size=$(wc -c < "$tmp" 2>/dev/null || echo 0)
+    magic=$(LC_ALL=C od -An -tx1 -N4 "$tmp" 2>/dev/null | tr -d ' \n')
+    if [ "$magic" != "7f454c46" ] || [ "$size" -lt 1048576 ]; then
+        rm -f "$tmp"
+        warn "Latest launcher asset is not a valid Linux ELF binary (size=${size}, magic=${magic:-unknown})."
+        return 1
+    fi
+
+    chmod 0755 "$tmp"
+    if [ -f "$LAUNCHER" ] && cmp -s "$tmp" "$LAUNCHER"; then
+        rm -f "$tmp"
+        info "DaggerLauncher is already the latest published release."
         return 0
     fi
+    mv -f "$tmp" "$LAUNCHER"
+    return 0
+}
 
-    local github_url="https://github.com/itsFLoKi/daggerConnect/releases/download/v1.1/DaggerLauncher"
-
-    info "Downloading DaggerLauncher..."
-    if ! curl -fsSL --connect-timeout 10 --max-time 60 -o "$LAUNCHER" "$github_url"; then
-        error "Failed to download DaggerLauncher -- check network/DNS, or place the binary at ${LAUNCHER} yourself (chmod +x) and re-run."
+ensure_launcher() {
+    local role="$1"
+    info "Checking the latest DaggerLauncher release..."
+    if download_latest_launcher; then
+        ok "DaggerLauncher ready : ${LAUNCHER}"
+        return 0
     fi
-    chmod +x "$LAUNCHER"
-    ok "DaggerLauncher downloaded"
+    if [ -x "$LAUNCHER" ]; then
+        warn "Could not fetch the latest launcher; keeping the existing executable."
+        return 0
+    fi
+    error "Failed to download DaggerLauncher -- check network/DNS, or place a Linux launcher at ${LAUNCHER}, chmod +x it, and re-run."
 }
 
 update_launcher() {
     hr "Update Launcher"
     echo ""
 
-    local github_url="https://github.com/itsFLoKi/daggerConnect/releases/latest/download/DaggerLauncher"
-    local tmp
-    tmp=$(mktemp "${LAUNCHER}.XXXXXX")
-
     step "Downloading latest DaggerLauncher from GitHub..."
-    if ! curl -fsSL --connect-timeout 10 --max-time 60 -o "$tmp" "$github_url"; then
-        rm -f "$tmp"
+    if ! download_latest_launcher; then
         error "Download failed -- check network/DNS. ${LAUNCHER} was left untouched."
     fi
-    if [ ! -s "$tmp" ]; then
-        rm -f "$tmp"
-        error "Downloaded file is empty -- something is wrong with the release asset. ${LAUNCHER} was left untouched."
-    fi
-
-    chmod +x "$tmp"
-    mv -f "$tmp" "$LAUNCHER"
     ok "DaggerLauncher updated : ${LAUNCHER}"
 
     mapfile -t SERVICES < <(list_services)
@@ -929,7 +973,7 @@ build_ports_yaml() {
 SOCKS5_ENABLED="false"
 SOCKS5_BIND=""
 
-CLIENT_CONN_POOL="8"
+CLIENT_CONN_POOL="6"
 
 ask_connection_pool() {
     echo ""
@@ -937,7 +981,7 @@ ask_connection_pool() {
     echo -e "        Multiple parallel connections per path -- if one drops, the"
     echo -e "        others keep traffic flowing while it reconnects."
     echo ""
-    ask CLIENT_CONN_POOL "Connections per path" "8"
+    ask CLIENT_CONN_POOL "Connections per path" "6"
 }
 
 ask_socks5() {
@@ -964,7 +1008,7 @@ TUN_SOCK_BUF=""
 TUN_RX_QUEUE=""
 TUN_TXQUEUELEN=""
 ADV_PROFILE="auto"
-ADV_TCP_KEEPALIVE="1"
+ADV_TCP_KEEPALIVE="30"
 ADV_CONN_TIMEOUT="30"
 ADV_SESSION_TIMEOUT="60"
 ADV_CLEANUP_INTERVAL="3"
@@ -975,6 +1019,10 @@ ADV_CHANNEL_BACKLOG="4096"
 ADV_STREAM_CHAN_BUF="512"
 ADV_KEEPALIVE_SEC="15"
 ADV_DEAD_TIMEOUT_SEC="60"
+ADV_HEALTH_PROBE_SEC="10"
+ADV_HEALTH_PROBE_TIMEOUT_MS="3000"
+ADV_HEALTH_MAX_MISSED="4"
+ADV_HANDSHAKE_TIMEOUT_SEC="30"
 
 apply_profile() {
     local p="$1"
@@ -984,33 +1032,41 @@ apply_profile() {
             ADV_TCP_READ_BUF="4194304"   ADV_TCP_WRITE_BUF="4194304"
             ADV_UDP_BUF="4194304"
             ADV_CHANNEL_BACKLOG="4096"   ADV_STREAM_CHAN_BUF="512"
-            ADV_TCP_KEEPALIVE="1"        ADV_CONN_TIMEOUT="30"
+            ADV_TCP_KEEPALIVE="30"       ADV_CONN_TIMEOUT="30"
             ADV_SESSION_TIMEOUT="60"     ADV_CLEANUP_INTERVAL="3"
             ADV_KEEPALIVE_SEC="15"       ADV_DEAD_TIMEOUT_SEC="60"
+            ADV_HEALTH_PROBE_SEC="10"    ADV_HEALTH_PROBE_TIMEOUT_MS="3000"
+            ADV_HEALTH_MAX_MISSED="4"    ADV_HANDSHAKE_TIMEOUT_SEC="30"
             ;;
         aggressive)
             ADV_TCP_READ_BUF="16777216"  ADV_TCP_WRITE_BUF="16777216"
             ADV_UDP_BUF="16777216"
             ADV_CHANNEL_BACKLOG="8192"   ADV_STREAM_CHAN_BUF="2048"
-            ADV_TCP_KEEPALIVE="1"        ADV_CONN_TIMEOUT="60"
+            ADV_TCP_KEEPALIVE="30"       ADV_CONN_TIMEOUT="60"
             ADV_SESSION_TIMEOUT="120"    ADV_CLEANUP_INTERVAL="5"
             ADV_KEEPALIVE_SEC="20"       ADV_DEAD_TIMEOUT_SEC="80"
+            ADV_HEALTH_PROBE_SEC="10"    ADV_HEALTH_PROBE_TIMEOUT_MS="3000"
+            ADV_HEALTH_MAX_MISSED="4"    ADV_HANDSHAKE_TIMEOUT_SEC="30"
             ;;
         low_latency)
             ADV_TCP_READ_BUF="2097152"   ADV_TCP_WRITE_BUF="2097152"
             ADV_UDP_BUF="2097152"
             ADV_CHANNEL_BACKLOG="2048"   ADV_STREAM_CHAN_BUF="256"
-            ADV_TCP_KEEPALIVE="1"        ADV_CONN_TIMEOUT="15"
+            ADV_TCP_KEEPALIVE="20"       ADV_CONN_TIMEOUT="20"
             ADV_SESSION_TIMEOUT="30"     ADV_CLEANUP_INTERVAL="2"
-            ADV_KEEPALIVE_SEC="10"       ADV_DEAD_TIMEOUT_SEC="30"
+            ADV_KEEPALIVE_SEC="10"       ADV_DEAD_TIMEOUT_SEC="45"
+            ADV_HEALTH_PROBE_SEC="8"     ADV_HEALTH_PROBE_TIMEOUT_MS="2500"
+            ADV_HEALTH_MAX_MISSED="4"    ADV_HANDSHAKE_TIMEOUT_SEC="30"
             ;;
         low_hardware)
             ADV_TCP_READ_BUF="524288"    ADV_TCP_WRITE_BUF="524288"
             ADV_UDP_BUF="524288"
             ADV_CHANNEL_BACKLOG="512"    ADV_STREAM_CHAN_BUF="128"
-            ADV_TCP_KEEPALIVE="5"        ADV_CONN_TIMEOUT="20"
+            ADV_TCP_KEEPALIVE="30"       ADV_CONN_TIMEOUT="30"
             ADV_SESSION_TIMEOUT="45"     ADV_CLEANUP_INTERVAL="3"
             ADV_KEEPALIVE_SEC="30"       ADV_DEAD_TIMEOUT_SEC="90"
+            ADV_HEALTH_PROBE_SEC="15"    ADV_HEALTH_PROBE_TIMEOUT_MS="4000"
+            ADV_HEALTH_MAX_MISSED="4"    ADV_HANDSHAKE_TIMEOUT_SEC="45"
             ;;
     esac
 }
@@ -1038,8 +1094,8 @@ ask_tun_custom() {
 
     echo -e "  ${DIM}MTU — bytes per packet on the tunnel. Higher means fewer packets for${NC}"
     echo -e "  ${DIM}the same data, but anything above the real path MTU fragments, which${NC}"
-    echo -e "  ${DIM}costs far more than it saves. 1400-1460 is the safe band.${NC}"
-    ask_num_range TUN_MTU "  mtu            (bytes)" "1420" 576 9000
+    echo -e "  ${DIM}costs far more than it saves. 1280-1400 is the stable Internet band.${NC}"
+    ask_num_range TUN_MTU "  mtu            (bytes)" "1380" 576 9000
     echo ""
 
     echo -e "  ${DIM}sock_buf — pcap capture/inject buffer. Absorbs inbound bursts; this${NC}"
@@ -1158,7 +1214,7 @@ ask_advanced() {
             ADV_AUTO_TUNE="false"
             ADV_PROFILE="custom"
             echo -e "  ${BOLD}Timeouts & Intervals:${NC}"
-            ask ADV_TCP_KEEPALIVE    "tcp_keepalive       (sec)"    "1"
+            ask ADV_TCP_KEEPALIVE    "tcp_keepalive       (sec)"    "30"
             ask ADV_CONN_TIMEOUT     "connection_timeout  (sec)"    "30"
             ask ADV_SESSION_TIMEOUT  "session_timeout     (sec)"    "60"
             ask ADV_CLEANUP_INTERVAL "cleanup_interval    (sec)"    "3"
@@ -1169,6 +1225,12 @@ ask_advanced() {
             echo -e "  ${DIM}at least ~3x keepalive_sec so lost pings don't cause a false drop.${NC}"
             ask ADV_KEEPALIVE_SEC    "keepalive_sec       (sec)"    "15"
             ask ADV_DEAD_TIMEOUT_SEC "dead_timeout_sec    (sec)"    "60"
+            echo ""
+            echo -e "  ${BOLD}Unified health / reconnect guard:${NC}"
+            ask ADV_HEALTH_PROBE_SEC       "health_probe_sec       (sec)" "10"
+            ask ADV_HEALTH_PROBE_TIMEOUT_MS "health_probe_timeout_ms (ms)" "3000"
+            ask ADV_HEALTH_MAX_MISSED      "health_max_missed    (count)" "4"
+            ask ADV_HANDSHAKE_TIMEOUT_SEC  "handshake_timeout_sec  (sec)" "30"
             echo ""
             echo -e "  ${BOLD}Buffers  (bytes, e.g. 4194304 = 4MB):${NC}"
             ask ADV_TCP_READ_BUF     "tcp_read_buffer     (bytes)"  "4194304"
@@ -1214,8 +1276,16 @@ build_advanced_json() {
 '      "$ADV_STREAM_CHAN_BUF"
     printf '    "keepalive_sec": %s,
 '      "$ADV_KEEPALIVE_SEC"
-    printf '    "dead_timeout_sec": %s
+    printf '    "dead_timeout_sec": %s,
 '   "$ADV_DEAD_TIMEOUT_SEC"
+    printf '    "health_probe_sec": %s,
+' "$ADV_HEALTH_PROBE_SEC"
+    printf '    "health_probe_timeout_ms": %s,
+' "$ADV_HEALTH_PROBE_TIMEOUT_MS"
+    printf '    "health_max_missed": %s,
+' "$ADV_HEALTH_MAX_MISSED"
+    printf '    "handshake_timeout_sec": %s
+' "$ADV_HANDSHAKE_TIMEOUT_SEC"
     printf '  }'
 }
 
@@ -1264,6 +1334,14 @@ build_advanced_yaml() {
 "     "$ADV_KEEPALIVE_SEC"
     printf "  dead_timeout_sec: %s
 "  "$ADV_DEAD_TIMEOUT_SEC"
+    printf "  health_probe_sec: %s
+" "$ADV_HEALTH_PROBE_SEC"
+    printf "  health_probe_timeout_ms: %s
+" "$ADV_HEALTH_PROBE_TIMEOUT_MS"
+    printf "  health_max_missed: %s
+" "$ADV_HEALTH_MAX_MISSED"
+    printf "  handshake_timeout_sec: %s
+" "$ADV_HANDSHAKE_TIMEOUT_SEC"
 }
 
 dc_applies() {
@@ -1275,28 +1353,37 @@ dc_applies() {
 
 build_dc_json() {
     dc_applies || return 0
+    printf '  "per_connection": true,
+  "per_connection_pool": %s,
+' "$PER_CONNECTION_POOL"
     [ "$DC_PROFILE" = "auto" ] && return 0
     printf '  "dc": {
     "streams_per_carrier": %s,
     "max_carriers": %s,
-    "carrier_lifetime_secs": %s
+    "carrier_lifetime_secs": %s,
+    "window_bytes": %s
   },
-' "$DC_STREAMS" "$DC_CARRIERS" "$DC_LIFETIME"
+' "$DC_STREAMS" "$DC_CARRIERS" "$DC_LIFETIME" "$DC_WINDOW"
 }
 
 build_dc_yaml() {
     dc_applies || return 0
+    printf 'per_connection: true
+per_connection_pool: %s
+
+' "$PER_CONNECTION_POOL"
     [ "$DC_PROFILE" = "auto" ] && return 0
     printf 'dc:
   streams_per_carrier: %s
   max_carriers: %s
   carrier_lifetime_secs: %s
+  window_bytes: %s
 
-' "$DC_STREAMS" "$DC_CARRIERS" "$DC_LIFETIME"
+' "$DC_STREAMS" "$DC_CARRIERS" "$DC_LIFETIME" "$DC_WINDOW"
 }
 
 ask_dc() {
-    DC_PROFILE="auto"; DC_STREAMS=8; DC_CARRIERS=32; DC_LIFETIME=1500
+    DC_PROFILE="auto"; DC_STREAMS=8; DC_CARRIERS=32; DC_LIFETIME=1500; DC_WINDOW=1048576
 
     if ! dc_applies; then
         info "DC core : not used by ${TRANSPORT}"
@@ -1307,10 +1394,11 @@ ask_dc() {
     echo -e "  ${BOLD}DC core — how many connections share one carrier${NC}"
     echo -e "  ${DIM}A lost packet stalls everyone sharing that carrier until it is resent.${NC}"
     echo -e "  ${DIM}Fewer per carrier = better isolation, more connections to the network.${NC}"
+    echo -e "  ${DIM}Per-connection isolation keeps 6 bounded carriers ready on both ends.${NC}"
     echo ""
     echo "    1) Balanced   — 8 per carrier   (recommended)"
     echo "    2) Stability  — 4 per carrier   (lossy or heavily filtered path)"
-    echo "    3) Speed      — 16 per carrier  (clean path, fewer connections)"
+    echo "    3) Speed      — 12 per carrier  (clean path, fewer connections)"
     echo "    4) Custom"
     echo ""
     while true; do
@@ -1321,18 +1409,19 @@ ask_dc() {
                 info "DC core : balanced (8 per carrier, up to 32 carriers)"
                 break ;;
             2|stability|stable)
-                DC_PROFILE="stable"; DC_STREAMS=4; DC_CARRIERS=32; DC_LIFETIME=900
-                info "DC core : stability (4 per carrier, up to 32 carriers, renewed every 15m)"
+                DC_PROFILE="stable"; DC_STREAMS=4; DC_CARRIERS=16; DC_LIFETIME=1500; DC_WINDOW=1048576
+                info "DC core : stability (4 per carrier, up to 16 carriers, 1MB window)"
                 break ;;
             3|speed|fast)
-                DC_PROFILE="speed"; DC_STREAMS=16; DC_CARRIERS=16; DC_LIFETIME=1800
-                info "DC core : speed (16 per carrier, up to 16 carriers)"
+                DC_PROFILE="speed"; DC_STREAMS=12; DC_CARRIERS=16; DC_LIFETIME=1800; DC_WINDOW=2097152
+                info "DC core : speed (12 per carrier, up to 16 carriers, 2MB window)"
                 break ;;
             4|custom)
                 DC_PROFILE="custom"
                 ask_num_range DC_STREAMS "Connections per carrier" 8 1 64
                 ask_num_range DC_CARRIERS "Maximum carriers" 32 2 64
                 ask_num_range DC_LIFETIME "Renew a carrier after (seconds, 0 = never)" 1500 0 86400
+                ask_num_range DC_WINDOW "Per-stream receive window (bytes)" 1048576 262144 8388608
                 [ "$DC_LIFETIME" = "0" ] && DC_LIFETIME=-1
                 info "DC core : custom (${DC_STREAMS} per carrier, up to ${DC_CARRIERS} carriers)"
                 break ;;
@@ -1636,7 +1725,7 @@ write_server_config_xhttp() {
     local cdn="$7" cdn_host="$8" cdn_port="$9" cdn_ips="${10}" insecure="${11}"
     local pool="${12}" peer_ip="${13}"
     shift 13
-    local ports_json ports_yaml transport edge_json edge_yaml peer_json peer_yaml
+    local ports_json ports_yaml transport edge_json edge_yaml peer_json peer_yaml up_concurrency
     local cert_json cert_yaml
 
     ports_json=$(build_ports_json "$@")
@@ -1648,7 +1737,9 @@ write_server_config_xhttp() {
 
     transport="xhttp"
     [ "$secure" = "true" ] && transport="xhttps"
-    [ -z "$pool" ] && pool=4
+    [ -z "$pool" ] && pool=6
+    up_concurrency=2
+    [ "$cdn" = "true" ] && up_concurrency=8
 
     cert_json=""
     cert_yaml=""
@@ -1679,6 +1770,12 @@ write_server_config_xhttp() {
   "xhttp": {
     "path": "%s",
     "mode": "auto",
+    "up_max_bytes": %s,
+    "up_concurrency": %s,
+    "buffer_bytes": %s,
+    "separate_conns": true,
+    "probe_ms": %s,
+    "socket_buf_bytes": %s,
     "allow_insecure_tls": %s,
     "cdn": {
       "enabled": true,
@@ -1688,7 +1785,8 @@ write_server_config_xhttp() {
     }
   },
 ' "$transport" "$psk" "$port" "$pool" "$peer_json" "$ports_json" \
-  "$path" "$insecure" "$cdn_host" "$cdn_port" "$edge_json"
+  "$path" "$XHTTP_UP_MAX_BYTES" "$up_concurrency" "$XHTTP_BUFFER_BYTES" "$XHTTP_PROBE_MS" "$XHTTP_SOCKET_BUF_BYTES" \
+  "$insecure" "$cdn_host" "$cdn_port" "$edge_json"
         else
             printf '{
   "mode": "server",
@@ -1705,9 +1803,16 @@ write_server_config_xhttp() {
   ],
   "xhttp": {
     "path": "%s",
-    "mode": "auto"
+    "mode": "auto",
+    "up_max_bytes": %s,
+    "up_concurrency": %s,
+    "buffer_bytes": %s,
+    "separate_conns": true,
+    "probe_ms": %s,
+    "socket_buf_bytes": %s
   },
-' "$transport" "$psk" "$cert_json" "$port" "$ports_json" "$path"
+' "$transport" "$psk" "$cert_json" "$port" "$ports_json" "$path" \
+  "$XHTTP_UP_MAX_BYTES" "$up_concurrency" "$XHTTP_BUFFER_BYTES" "$XHTTP_PROBE_MS" "$XHTTP_SOCKET_BUF_BYTES"
         fi
         build_socks5_json; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
@@ -1726,6 +1831,12 @@ listeners:
 xhttp:
   path: "%s"
   mode: auto
+  up_max_bytes: %s
+  up_concurrency: %s
+  buffer_bytes: %s
+  separate_conns: true
+  probe_ms: %s
+  socket_buf_bytes: %s
   allow_insecure_tls: %s
   cdn:
     enabled: true
@@ -1734,7 +1845,8 @@ xhttp:
     edge_ips: %s
 
 ' "$transport" "$psk" "$port" "$pool" "$peer_yaml" "$ports_yaml" \
-  "$path" "$insecure" "$cdn_host" "$cdn_port" "$edge_yaml"
+  "$path" "$XHTTP_UP_MAX_BYTES" "$up_concurrency" "$XHTTP_BUFFER_BYTES" "$XHTTP_PROBE_MS" "$XHTTP_SOCKET_BUF_BYTES" \
+  "$insecure" "$cdn_host" "$cdn_port" "$edge_yaml"
         else
             printf 'mode: server
 transport: %s
@@ -1747,8 +1859,15 @@ listeners:
 xhttp:
   path: "%s"
   mode: auto
+  up_max_bytes: %s
+  up_concurrency: %s
+  buffer_bytes: %s
+  separate_conns: true
+  probe_ms: %s
+  socket_buf_bytes: %s
 
-' "$transport" "$psk" "$cert_yaml" "$port" "$ports_yaml" "$path"
+' "$transport" "$psk" "$cert_yaml" "$port" "$ports_yaml" "$path" \
+  "$XHTTP_UP_MAX_BYTES" "$up_concurrency" "$XHTTP_BUFFER_BYTES" "$XHTTP_PROBE_MS" "$XHTTP_SOCKET_BUF_BYTES"
         fi
         build_socks5_yaml; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
@@ -1758,10 +1877,12 @@ write_client_config_xhttp() {
     local server_ip="$1" server_port="$2" psk="$3" path="$4" mode="$5" secure="$6"
     local insecure="$7" cdn="$8" cdn_host="$9" cdn_port="${10}" cdn_ips="${11}"
     local origin_port="${12}" cert="${13}" key="${14}" public_ip="${15}"
-    local transport addr peer_json peer_yaml cert_json cert_yaml
+    local transport addr peer_json peer_yaml cert_json cert_yaml up_concurrency
 
     transport="xhttp"
     [ "$secure" = "true" ] && transport="xhttps"
+    up_concurrency=2
+    [ "$cdn" = "true" ] && up_concurrency=8
 
     addr="${server_ip}:${server_port}"
     peer_json=$(build_edge_ips_json "$(echo "$server_ip" | xargs)")
@@ -1795,13 +1916,19 @@ write_client_config_xhttp() {
   "xhttp": {
     "path": "%s",
     "mode": "%s",
+    "up_max_bytes": %s,
+    "up_concurrency": %s,
+    "buffer_bytes": %s,
+    "separate_conns": true,
+    "probe_ms": %s,
+    "socket_buf_bytes": %s,
     "cdn": {
       "enabled": true,
       "origin_bind": "0.0.0.0:%s"
     }
   },
 ' "$transport" "$psk" "$cert_json" "$addr" "$peer_json" "$public_ip" \
-  "$path" "$mode" "$origin_port"
+  "$path" "$mode" "$XHTTP_UP_MAX_BYTES" "$up_concurrency" "$XHTTP_BUFFER_BYTES" "$XHTTP_PROBE_MS" "$XHTTP_SOCKET_BUF_BYTES" "$origin_port"
         else
             printf '{
   "mode": "client",
@@ -1819,9 +1946,16 @@ write_client_config_xhttp() {
   "xhttp": {
     "path": "%s",
     "mode": "%s",
+    "up_max_bytes": %s,
+    "up_concurrency": %s,
+    "buffer_bytes": %s,
+    "separate_conns": true,
+    "probe_ms": %s,
+    "socket_buf_bytes": %s,
     "allow_insecure_tls": %s
   },
-' "$transport" "$psk" "$addr" "$CLIENT_CONN_POOL" "$path" "$mode" "$insecure"
+' "$transport" "$psk" "$addr" "$CLIENT_CONN_POOL" "$path" "$mode" \
+  "$XHTTP_UP_MAX_BYTES" "$up_concurrency" "$XHTTP_BUFFER_BYTES" "$XHTTP_PROBE_MS" "$XHTTP_SOCKET_BUF_BYTES" "$insecure"
         fi
         build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
     else
@@ -1841,12 +1975,18 @@ paths:
 xhttp:
   path: "%s"
   mode: "%s"
+  up_max_bytes: %s
+  up_concurrency: %s
+  buffer_bytes: %s
+  separate_conns: true
+  probe_ms: %s
+  socket_buf_bytes: %s
   cdn:
     enabled: true
     origin_bind: "0.0.0.0:%s"
 
 ' "$transport" "$psk" "$cert_yaml" "$addr" "$peer_yaml" "$public_ip" \
-  "$path" "$mode" "$origin_port"
+  "$path" "$mode" "$XHTTP_UP_MAX_BYTES" "$up_concurrency" "$XHTTP_BUFFER_BYTES" "$XHTTP_PROBE_MS" "$XHTTP_SOCKET_BUF_BYTES" "$origin_port"
         else
             printf 'mode: client
 transport: %s
@@ -1861,9 +2001,16 @@ paths:
 xhttp:
   path: "%s"
   mode: "%s"
+  up_max_bytes: %s
+  up_concurrency: %s
+  buffer_bytes: %s
+  separate_conns: true
+  probe_ms: %s
+  socket_buf_bytes: %s
   allow_insecure_tls: %s
 
-' "$transport" "$psk" "$addr" "$CLIENT_CONN_POOL" "$path" "$mode" "$insecure"
+' "$transport" "$psk" "$addr" "$CLIENT_CONN_POOL" "$path" "$mode" \
+  "$XHTTP_UP_MAX_BYTES" "$up_concurrency" "$XHTTP_BUFFER_BYTES" "$XHTTP_PROBE_MS" "$XHTTP_SOCKET_BUF_BYTES" "$insecure"
         fi
         build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
     fi
@@ -2506,8 +2653,9 @@ install_service() {
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=DaggerConnect Tunnel (${SERVICE_NAME})
-After=network.target
+After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -2517,6 +2665,9 @@ ${extra_env}
 ExecStart=${LAUNCHER} -c ${CONFIG}
 Restart=always
 RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGTERM
+LimitNOFILE=1048576
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=DaggerConnect
@@ -2603,7 +2754,7 @@ install_server() {
             else
                 XHTTP_CDN="false"; XHTTP_CDN_HOST=""; XHTTP_CDN_PORT="80"
                 XHTTP_CDN_IPS=""; XHTTP_INSECURE="true"; XHTTP_ORIGIN_PORT="8443"
-                XHTTP_PEER_IP=""; XHTTP_PUBLIC_IP=""; XHTTP_CDN_POOL="4"
+                XHTTP_PEER_IP=""; XHTTP_PUBLIC_IP=""; XHTTP_CDN_POOL="6"
             fi
             if [ "$XHTTP_CDN" = "true" ]; then
                 PORT="$XHTTP_CDN_PORT"
@@ -2666,8 +2817,8 @@ install_server() {
             ask TUN_IFACE "Network interface  (leave empty for auto-detect)" ""
             ask TUN_NAME  "TUN device name" "dagger0"
             echo ""
-            ask TUN_HEARTBEAT_SEC    "Heartbeat interval (sec)  -- lower = faster failure detection" "5"
-            ask TUN_IDLE_TIMEOUT_SEC "Idle timeout (sec)  -- how long with no traffic before reconnecting" "60"
+            ask TUN_HEARTBEAT_SEC    "Heartbeat interval (sec)  -- lower = faster failure detection" "10"
+            ask TUN_IDLE_TIMEOUT_SEC "Idle timeout (sec)  -- how long with no traffic before reconnecting" "90"
             ask_tun_profile
             echo ""
             ask TUN_SPOOF_CHOICE "Enable IP Spoof (y/n)" "n"
@@ -2716,6 +2867,7 @@ install_server() {
                      "$XHTTP_CDN_POOL" "$XHTTP_PEER_IP" "${PORTS[@]}" ;;
         tun)     write_server_config_tun     "$PORT" "$PSK" "$TUN_LOCAL_IP" "$TUN_PEER_IP" "$TUN_LOCAL_ADDR" "$TUN_REMOTE_ADDR" "$TUN_ENCAP" "$TUN_PROFILE" "$TUN_IFACE" "$TUN_SPOOF_SRC" "$TUN_SPOOF_DST" "$TUN_DCPI" "$TUN_NAME" "$TUN_HEARTBEAT_SEC" "$TUN_IDLE_TIMEOUT_SEC" "${PORTS[@]}" ;;
     esac
+    chmod 0600 "$CONFIG"
     ok "Config written: ${CONFIG}"
 
     install_service
@@ -2860,7 +3012,7 @@ install_client() {
             else
                 XHTTP_CDN="false"; XHTTP_CDN_HOST=""; XHTTP_CDN_PORT="80"
                 XHTTP_CDN_IPS=""; XHTTP_INSECURE="true"; XHTTP_ORIGIN_PORT="8443"
-                XHTTP_PEER_IP=""; XHTTP_PUBLIC_IP=""; XHTTP_CDN_POOL="4"
+                XHTTP_PEER_IP=""; XHTTP_PUBLIC_IP=""; XHTTP_CDN_POOL="6"
             fi
             if [ "$XHTTP_CDN" = "true" ]; then
                 echo ""
@@ -2881,7 +3033,7 @@ install_client() {
                 ok "Client IP : ${XHTTP_PUBLIC_IP:-not stated}"
                 ok "Server IP : ${SERVER_IP}"
                 SERVER_PORT="$XHTTP_ORIGIN_PORT"
-                CLIENT_CONN_POOL=4
+                CLIENT_CONN_POOL=6
 
                 echo ""
                 echo -e "  ${BOLD}Certificate for Cloudflare to connect to${NC}"
@@ -2945,8 +3097,8 @@ install_client() {
             ask TUN_IFACE "Network interface  (leave empty for auto-detect)" ""
             ask TUN_NAME  "TUN device name" "dagger0"
             echo ""
-            ask TUN_HEARTBEAT_SEC    "Heartbeat interval (sec)  -- doesn't need to match the server, but similar values make sense" "5"
-            ask TUN_IDLE_TIMEOUT_SEC "Idle timeout (sec)  -- how long with no traffic before reconnecting" "60"
+            ask TUN_HEARTBEAT_SEC    "Heartbeat interval (sec)  -- doesn't need to match the server, but similar values make sense" "10"
+            ask TUN_IDLE_TIMEOUT_SEC "Idle timeout (sec)  -- how long with no traffic before reconnecting" "90"
             ask_tun_profile
             echo ""
             ask TUN_SPOOF_CHOICE "Enable IP Spoof (y/n)" "n"
@@ -2987,6 +3139,7 @@ install_client() {
                      "$XHTTP_ORIGIN_PORT" "$CERT_FILE" "$KEY_FILE" "$XHTTP_PUBLIC_IP" ;;
         tun)     write_client_config_tun     "$SERVER_PORT" "$PSK" "$TUN_LOCAL_IP" "$TUN_PEER_IP" "$TUN_LOCAL_ADDR" "$TUN_REMOTE_ADDR" "$TUN_ENCAP" "$TUN_PROFILE" "$TUN_IFACE" "$TUN_SPOOF_SRC" "$TUN_SPOOF_DST" "$TUN_DCPI" "$TUN_NAME" "$TUN_HEARTBEAT_SEC" "$TUN_IDLE_TIMEOUT_SEC" ;;
     esac
+    chmod 0600 "$CONFIG"
     ok "Config written: ${CONFIG}"
 
     install_service
@@ -3318,6 +3471,7 @@ if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
 fi
 
 [ "$EUID" -ne 0 ] && { echo -e "${RED}[ERR ]${NC}  Run as root: sudo bash setup.sh"; exit 1; }
+ensure_runtime_dependencies
 
 while true; do
     clear 2>/dev/null || true
