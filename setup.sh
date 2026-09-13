@@ -30,7 +30,6 @@ XHTTP_UP_MAX_BYTES="65536"
 XHTTP_BUFFER_BYTES="32768"
 XHTTP_PROBE_MS="8000"
 XHTTP_SOCKET_BUF_BYTES="131072"
-PER_CONNECTION_POOL="6"
 CHANNEL=""
 VERSION=""
 SERVER_PUBLIC_IP=""
@@ -903,6 +902,21 @@ switch_channel() {
 
     set_unit_env DC_CHANNEL "$new_channel"
     set_unit_env DC_VERSION "$new_version"
+
+    # Migrate services created by older installers.  A failing launcher/core
+    # used to be restarted every five seconds, which amplified an authority
+    # outage into a request storm.  Exit 78 is a permanent host/config
+    # limitation and must stay stopped until the operator fixes it.
+    if grep -q '^RestartSec=' "$svc_file" 2>/dev/null; then
+        sed -i 's/^RestartSec=.*/RestartSec=60/' "$svc_file"
+    else
+        sed -i '/^Restart=/a RestartSec=60' "$svc_file"
+    fi
+    if grep -q '^RestartPreventExitStatus=' "$svc_file" 2>/dev/null; then
+        sed -i 's/^RestartPreventExitStatus=.*/RestartPreventExitStatus=78/' "$svc_file"
+    else
+        sed -i '/^RestartSec=/a RestartPreventExitStatus=78' "$svc_file"
+    fi
     systemctl daemon-reload
 
     step "Restarting ${svc} on channel=${new_channel} version=${new_version} ..."
@@ -1370,10 +1384,8 @@ dc_applies() {
 }
 
 build_dc_json() {
+    printf '  "profile_id": "%s",\n' "${PAIR_PROFILE_ID:-default}"
     dc_applies || return 0
-    printf '  "per_connection": true,
-  "per_connection_pool": %s,
-' "$PER_CONNECTION_POOL"
     [ "$DC_PROFILE" = "auto" ] && return 0
     printf '  "dc": {
     "streams_per_carrier": %s,
@@ -1385,11 +1397,8 @@ build_dc_json() {
 }
 
 build_dc_yaml() {
+    printf 'profile_id: "%s"\n' "${PAIR_PROFILE_ID:-default}"
     dc_applies || return 0
-    printf 'per_connection: true
-per_connection_pool: %s
-
-' "$PER_CONNECTION_POOL"
     [ "$DC_PROFILE" = "auto" ] && return 0
     printf 'dc:
   streams_per_carrier: %s
@@ -1412,7 +1421,7 @@ ask_dc() {
     echo -e "  ${BOLD}DC core — how many connections share one carrier${NC}"
     echo -e "  ${DIM}A lost packet stalls everyone sharing that carrier until it is resent.${NC}"
     echo -e "  ${DIM}Fewer per carrier = better isolation, more connections to the network.${NC}"
-    echo -e "  ${DIM}Per-connection isolation keeps 6 bounded carriers ready on both ends.${NC}"
+    echo -e "  ${DIM}DC shares bounded carriers and grows the pool as needed.${NC}"
     echo ""
     echo "    1) Balanced   — 8 per carrier   (recommended)"
     echo "    2) Stability  — 4 per carrier   (lossy or heavily filtered path)"
@@ -2683,6 +2692,7 @@ ${extra_env}
 ExecStart=${LAUNCHER} -c ${CONFIG}
 Restart=always
 RestartSec=60
+RestartPreventExitStatus=78
 TimeoutStopSec=20
 KillSignal=SIGTERM
 LimitNOFILE=1048576
@@ -2722,6 +2732,18 @@ list_services() {
     printf '%s\n' "${found[@]}" | sort -u
 }
 
+ask_pair_profile_id() {
+    echo "Use the SAME profile ID on this server and all clients of this profile."
+    echo "Use a DIFFERENT ID for each separate server profile (for example tunnel-a)."
+    while true; do
+        ask_required PAIR_PROFILE_ID "Pairing profile ID"
+        if [[ "$PAIR_PROFILE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]]; then
+            break
+        fi
+        warn "Use 1-64 ASCII letters, digits, dots, underscores or hyphens."
+    done
+}
+
 install_server() {
     hr "Install Server"
     ensure_launcher server
@@ -2730,6 +2752,7 @@ install_server() {
     echo ""
 
     ask_service_name
+    ask_pair_profile_id
     echo ""
 
     CHANNEL="release"
@@ -2977,6 +3000,7 @@ install_client() {
     echo ""
 
     ask_service_name
+    ask_pair_profile_id
     echo ""
 
     CHANNEL="release"
