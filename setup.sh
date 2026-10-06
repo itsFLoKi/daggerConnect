@@ -271,16 +271,18 @@ ask_transport() {
 select_transport_release() {
     CHANNEL="release"; VERSION="latest"
     if [ "${QM_PROFILE:-}" = gaming ]; then
-        info "Quantum Gaming needs a build that includes quantum.profile, on BOTH endpoints."
+        info "Quantum Gaming: stable v4.2.8+ or beta v4.3.1+, on BOTH endpoints."
+        ask_version "$1" "v4.3.1" "v4.2.8"
+        return
     fi
     case "$TRANSPORT" in
         dc6)
-            info "This transport requires v4.2.7 or newer on BOTH endpoints."
-            ask_version "$1" "v4.2.7"
+            info "DC6: stable v4.2.8+ or beta v4.2.9+, on BOTH endpoints."
+            ask_version "$1" "v4.2.9" "v4.2.8"
             ;;
         quantum-gaming)
-            info "Quantum Gaming requires v4.2.7 or newer on BOTH endpoints."
-            ask_version "$1" "v4.2.7"
+            info "Quantum Gaming: stable v4.2.8+ or beta v4.3.1+, on BOTH endpoints."
+            ask_version "$1" "v4.3.1" "v4.2.8"
             ;;
     esac
     info "Version : ${VERSION} (${CHANNEL})"
@@ -720,60 +722,10 @@ check_ptrace_scope() {
 }
 
 tune_network() {
-    hr "Network Tuning (fq + BBR, bounded buffers)"
-
-    # Speed / kernel optimization for the whole script: runs for every install
-    # (server or client, any transport). Values are persistent and bounded; the
-    # core's startup tuner only ever raises ceilings, so the two never conflict.
-    local sysctl_file="/etc/sysctl.d/99-daggerconnect-net.conf"
-    step "Writing ${sysctl_file}"
-    if ! cat > "$sysctl_file" 2>/dev/null << 'EOF'
-# DaggerConnect network tuning -- managed by setup.sh (safe to keep).
-net.core.rmem_max = 16777216
-net.core.wmem_max = 16777216
-net.core.rmem_default = 262144
-net.core.wmem_default = 262144
-net.core.optmem_max = 65536
-net.core.netdev_max_backlog = 8192
-net.core.somaxconn = 4096
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-net.ipv4.tcp_rmem = 4096 131072 16777216
-net.ipv4.tcp_wmem = 4096 131072 16777216
-net.ipv4.udp_rmem_min = 131072
-net.ipv4.udp_wmem_min = 131072
-net.ipv4.tcp_mtu_probing = 1
-net.ipv4.tcp_fastopen = 3
-net.ipv4.tcp_slow_start_after_idle = 0
-EOF
-    then
-        warn "Could not write ${sysctl_file} (need root?) -- skipping network tuning."
-        echo ""
-        return 0
-    fi
-
-    modprobe tcp_bbr 2>/dev/null || true
-    if [ ! -f /etc/modules-load.d/daggerconnect-bbr.conf ]; then
-        echo "tcp_bbr" > /etc/modules-load.d/daggerconnect-bbr.conf 2>/dev/null || true
-    fi
-
-    # Apply only our own file (-e ignores keys this kernel lacks). Never run
-    # `sysctl --system`: it would also re-apply unrelated host sysctl files.
-    step "Applying now (sysctl)"
-    if sysctl -e -p "$sysctl_file" >/dev/null 2>&1; then
-        ok "Applied and persisted (survives reboot)."
-    else
-        warn "Could not apply all sysctls now -- they will still take effect on next reboot."
-    fi
-
-    local cc qd
-    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
-    qd=$(sysctl -n net.core.default_qdisc 2>/dev/null)
-    info "Congestion control: ${BOLD}${cc:-unknown}${NC}   qdisc: ${BOLD}${qd:-unknown}${NC}"
-    if [ "$cc" != "bbr" ]; then
-        warn "BBR not active (kernel may lack tcp_bbr). Throughput tuning still applied; consider a newer kernel for BBR."
-    fi
-    echo ""
+    # Runtime owns bounded tuning; do not overwrite host policy during install.
+    # In particular, never run sysctl --system (which applies unrelated files).
+    info "This core tunes kernel buffer/queue ceilings at tunnel startup (unless tuner is off)."
+    info "Existing sysctl files, congestion control and interface queues are preserved."
 }
 
 download_latest_launcher() {
@@ -889,7 +841,7 @@ except (ValueError, TypeError) as exc:
 }
 
 ask_version() {
-    local role="$1" required_min="${2:-}"
+    local role="$1" required_min="${2:-}" release_min="${3:-${2:-}}" selected_min
 
     echo ""
     info "Fetching available versions..."
@@ -898,12 +850,12 @@ ask_version() {
     # Preserve stderr: an HTTP/TLS/launcher error is not an empty release list.
     if ! json=$("$LAUNCHER" --list-versions --role "$role"); then
         warn "Launcher could not retrieve versions for role=${role}; see the error above."
-        ask_channel_manual "$required_min"
+        ask_channel_manual "$required_min" "$release_min"
         return
     fi
     if ! rows=$(printf '%s' "$json" | parse_version_list); then
         warn "Version-list parsing failed; falling back to manual entry."
-        ask_channel_manual "$required_min"
+        ask_channel_manual "$required_min" "$release_min"
         return
     fi
 
@@ -913,7 +865,9 @@ ask_version() {
     while IFS=$'\t' read -r channel version; do
         version="${version%$'\r'}"
         [ -n "$version" ] || continue
-        if [ -n "$required_min" ] && ! version_at_least "$version" "$required_min"; then
+        selected_min="$required_min"
+        [ "$channel" != release ] || selected_min="$release_min"
+        if [ -n "$selected_min" ] && ! version_at_least "$version" "$selected_min"; then
             continue
         fi
         case "$channel" in
@@ -924,7 +878,7 @@ ask_version() {
 
     if [ "$(( ${#rel_list[@]} + ${#beta_list[@]} ))" -eq 0 ]; then
         warn "No published versions meet this selection. Check the releases directory or enter a published version manually."
-        ask_channel_manual "$required_min"
+        ask_channel_manual "$required_min" "$release_min"
         return
     fi
 
@@ -937,7 +891,7 @@ ask_version() {
     fi
 
     if [ -n "$required_min" ]; then
-        info "Minimum ${required_min}. Pick a numbered version ('latest' is not offered here)."
+        info "Minimum: stable ${release_min}, beta ${required_min}. Pick a numbered version."
     fi
 
     echo ""
@@ -990,7 +944,7 @@ ask_version() {
 }
 
 ask_channel_manual() {
-    local required_min="${1:-}"
+    local required_min="${1:-}" release_min="${2:-${1:-}}"
     echo ""
     echo -e "  ${BOLD}Release Channel:${NC}"
     echo "    1)  release"
@@ -1005,6 +959,7 @@ ask_channel_manual() {
         esac
     done
     info "Channel : ${CHANNEL}"
+    [ "$CHANNEL" != release ] || required_min="$release_min"
 
     echo ""
     if [ -n "$required_min" ]; then
@@ -1052,7 +1007,7 @@ switch_channel() {
     for cfg_candidate in "${CONFIG_DIR}/${svc}.json" "${CONFIG_DIR}/${svc}.yaml"; do
         [ -f "$cfg_candidate" ] || continue
         if config_needs_new_transport_core "$cfg_candidate"; then
-            svc_min="v4.2.7"
+            svc_min="v4.2.9"
         fi
         if grep -qE '"mode"[[:space:]]*:[[:space:]]*"server"|^[[:space:]]*mode[[:space:]]*:[[:space:]]*server' "$cfg_candidate"; then
             svc_role="server"; break
@@ -1062,10 +1017,10 @@ switch_channel() {
     done
 
     if [ -n "$svc_role" ]; then
-        ask_version "$svc_role" "$svc_min"
+        ask_version "$svc_role" "$svc_min" "${svc_min:+v4.2.8}"
     else
         warn "Could not determine whether '${svc}' is a server or client from its config -- falling back to manual entry."
-        ask_channel_manual "$svc_min"
+        ask_channel_manual "$svc_min" "${svc_min:+v4.2.8}"
     fi
     local new_channel="$CHANNEL" new_version="$VERSION"
 
@@ -1381,20 +1336,11 @@ quantum_profile_yaml() {
 
 ask_quantum_settings() {
     ask_num_range QM_MTU "MTU" 1350 512 9000
-    echo ""
-    echo -e "  ${BOLD}Transport encryption (header cipher)${NC}  -- must be the same on BOTH ends"
-    echo "    1)  Default  (aes)       recommended: strong and fast on modern CPUs"
-    echo "    2)  salsa20              faster on CPUs without AES hardware acceleration"
-    echo "    3)  none                 no header encryption (lowest CPU use; traffic is exposed)"
     while true; do
-        ask QM_BLOCK "Choose 1-3 or a cipher name" 1
-        case "${QM_BLOCK,,}" in
-            1|default|aes)  QM_BLOCK="aes";     break ;;
-            2|salsa20)      QM_BLOCK="salsa20"; break ;;
-            3|none)         QM_BLOCK="none"
-                            warn "Encryption is off: only use this on a path you trust."
-                            break ;;
-            *) warn "Choose 1 (default/aes), 2 (salsa20) or 3 (none)." ;;
+        ask QM_BLOCK "Header cipher (aes/salsa20/none; match both ends)" aes
+        case "$QM_BLOCK" in
+            aes|salsa20|none) break ;;
+            *) warn "Choose aes, salsa20 or none." ;;
         esac
     done
 }
@@ -2795,10 +2741,14 @@ write_server_config_tun() {
             printf '  - addr: "0.0.0.0:%s"\n' "$port"
             printf '    transport: tun
 '
+            if [ -n "$ports_yaml" ]; then
             printf '    maps:
 '
             printf '%s
 '               "$ports_yaml"
+            else
+                printf '    maps: []\n'
+            fi
             printf 'tun:
 '
             printf '  encapsulation: "%s"
@@ -3172,16 +3122,18 @@ install_server() {
             ask_tun_liveness
             ask_tun_profile
             echo ""
-            ask TUN_SPOOF_CHOICE "Enable IP Spoof (y/n)" "n"
+            ask TUN_DCPI_CHOICE "Enable DCPI (IPv4/proto58) (y/n)" "n"
+            [ "$TUN_DCPI_CHOICE" = "y" ] || [ "$TUN_DCPI_CHOICE" = "Y" ] && TUN_DCPI="yes" || TUN_DCPI="no"
+            TUN_SPOOF_CHOICE="n"
+            if [ "$TUN_DCPI" != "yes" ]; then
+                ask TUN_SPOOF_CHOICE "Enable IP Spoof (y/n)" "n"
+            fi
             if [ "$TUN_SPOOF_CHOICE" = "y" ] || [ "$TUN_SPOOF_CHOICE" = "Y" ]; then
                 ask TUN_SPOOF_SRC "Spoof Source IP" ""
                 ask TUN_SPOOF_DST "Spoof Dest IP  " ""
             else
                 TUN_SPOOF_SRC="" TUN_SPOOF_DST=""
             fi
-            echo ""
-            ask TUN_DCPI_CHOICE "Enable DCPI Mode  (ICMPv6/proto58) (y/n)" "n"
-            [ "$TUN_DCPI_CHOICE" = "y" ] || [ "$TUN_DCPI_CHOICE" = "Y" ] && TUN_DCPI="yes" || TUN_DCPI="no"
             echo ""
             ;;
     esac
@@ -3404,16 +3356,18 @@ install_client() {
             ask_tun_liveness
             ask_tun_profile
             echo ""
-            ask TUN_SPOOF_CHOICE "Enable IP Spoof (y/n)" "n"
+            ask TUN_DCPI_CHOICE "Enable DCPI (IPv4/proto58) (y/n)" "n"
+            [ "$TUN_DCPI_CHOICE" = "y" ] || [ "$TUN_DCPI_CHOICE" = "Y" ] && TUN_DCPI="yes" || TUN_DCPI="no"
+            TUN_SPOOF_CHOICE="n"
+            if [ "$TUN_DCPI" != "yes" ]; then
+                ask TUN_SPOOF_CHOICE "Enable IP Spoof (y/n)" "n"
+            fi
             if [ "$TUN_SPOOF_CHOICE" = "y" ] || [ "$TUN_SPOOF_CHOICE" = "Y" ]; then
                 ask TUN_SPOOF_SRC "Spoof Source IP" ""
                 ask TUN_SPOOF_DST "Spoof Dest IP  " ""
             else
                 TUN_SPOOF_SRC="" TUN_SPOOF_DST=""
             fi
-            echo ""
-            ask TUN_DCPI_CHOICE "Enable DCPI Mode  (ICMPv6/proto58) (y/n)" "n"
-            [ "$TUN_DCPI_CHOICE" = "y" ] || [ "$TUN_DCPI_CHOICE" = "Y" ] && TUN_DCPI="yes" || TUN_DCPI="no"
             echo ""
             ;;
     esac
@@ -3708,6 +3662,16 @@ edit_config() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# Tester (menu 11)
+#
+# Server side: this server waits for the test.  Client side: this server runs it
+# against the Server.  The test itself lives in the licensed core and runs through
+# the launcher; the license is checked there, never here.  This installer only
+# starts the launcher and shows what the core prints, with its exit status as the
+# final answer.  Both sides use the PSK of the tunnel you plan to build and the
+# fixed pairing profile ID below, so there is nothing else to type or copy.
+# ---------------------------------------------------------------------------
 LINKTEST_PROFILE_ID="DC-TEST"
 LINKTEST_TMP_CFG=""
 LT_PSK=""
@@ -3827,8 +3791,8 @@ linktest_run_core() {
             echo ""
             warn "The core version the launcher fetched does not include Link Test."
             if [ "$attempt" -eq 1 ]; then
-                info "Pick a core version that does (v4.2.7 or newer)."
-                ask_version "$role" "v4.2.7"
+                info "Pick stable v4.2.8+ or beta v4.3.1+."
+                ask_version "$role" "v4.3.1" "v4.2.8"
                 continue
             fi
         fi
@@ -3946,7 +3910,6 @@ show_menu() {
     echo "    8)  Remove"
     echo "    9)  Core Version"
     echo "   10)  Update Launcher"
-    echo "   12)  Speed & kernel optimization (BBR, fq, buffers)"
     echo "    0)  Exit"
     echo ""
     ask CHOICE "Choice" ""
@@ -3987,7 +3950,6 @@ while true; do
         9) run_action switch_channel  ;;
         10) run_action update_launcher ;;
         11) run_action linktest_menu ;;
-        12) run_action tune_network ;;
         0) echo -e "\n  ${CYAN}Bye.${NC}\n"; exit 0 ;;
         *) warn "Invalid choice: ${CHOICE}" ;;
     esac
