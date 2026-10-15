@@ -49,29 +49,79 @@ step()  { printf '\n%b  %s%b\n' "$BOLD" "$*" "$NC"; }
 error() { printf '%b  Error:%b %s\n' "$RED" "$NC" "$*" >&2; exit 1; }
 hr()    { printf '\n%b  %s%b\n\n' "$BOLD" "$*" "$NC"; }
 
+# have_libpcap: the capture library the raw carriers (quantum, nova, tun) are linked
+# against. The binary loads it at start, so without it nothing runs, not only the
+# raw transports.
+have_libpcap() {
+    if command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -q 'libpcap\.so'; then
+        return 0
+    fi
+    local d
+    for d in /usr/lib /usr/lib64 /lib /lib64 /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu              /lib/x86_64-linux-gnu /lib/aarch64-linux-gnu /usr/local/lib; do
+        compgen -G "${d}/libpcap.so*" >/dev/null 2>&1 && return 0
+    done
+    return 1
+}
+
+# install_packages <apt names> -- <rpm names> -- <apk names> -- <pacman names>
+# installs from the package manager of this system; returns non-zero if none is
+# known or the install failed.
+install_packages() {
+    local -a apt=() rpm=() apk=() pac=()
+    local mode=apt arg
+    for arg in "$@"; do
+        if [ "$arg" = "--" ]; then
+            case "$mode" in apt) mode=rpm ;; rpm) mode=apk ;; apk) mode=pac ;; esac
+            continue
+        fi
+        case "$mode" in apt) apt+=("$arg") ;; rpm) rpm+=("$arg") ;; apk) apk+=("$arg") ;; pac) pac+=("$arg") ;; esac
+    done
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq >/dev/null 2>&1
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${apt[@]}" >/dev/null 2>&1
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y -q "${rpm[@]}" >/dev/null 2>&1
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y -q "${rpm[@]}" >/dev/null 2>&1
+    elif command -v zypper >/dev/null 2>&1; then
+        zypper --non-interactive install "${rpm[@]}" >/dev/null 2>&1
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache "${apk[@]}" >/dev/null 2>&1
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm --needed "${pac[@]}" >/dev/null 2>&1
+    else
+        return 1
+    fi
+}
+
 ensure_runtime_dependencies() {
     local missing=0 cmd
-    for cmd in curl od cmp wc python3 iptables; do
+    for cmd in curl od cmp wc python3 iptables ip; do
         command -v "$cmd" >/dev/null 2>&1 || missing=1
     done
+    have_libpcap || missing=1
     [ "$missing" -eq 0 ] && return 0
 
-    info "Installing launcher download and version-list dependencies..."
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq && apt-get install -y -qq ca-certificates curl coreutils python3 iptables
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y -q ca-certificates curl coreutils python3 iptables
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y -q ca-certificates curl coreutils python3 iptables
-    else
-        error "Missing curl/coreutils/python3 and no supported package manager was found."
+    info "Installing required system packages..."
+    # Debian/Ubuntu name the capture library libpcap0.8 (libpcap0.8t64 since 24.04).
+    # The core packages go first, so a failure of one optional name cannot block them.
+    if ! install_packages ca-certificates curl coreutils python3 iptables iproute2 --             ca-certificates curl coreutils python3 iptables iproute --             ca-certificates curl coreutils python3 iptables iproute2 --             ca-certificates curl coreutils python gawk iptables iproute2; then
+        command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 ||
+            error "Missing curl/coreutils/python3 and no supported package manager was found."
+    fi
+    if ! have_libpcap; then
+        install_packages libpcap0.8t64 -- libpcap -- libpcap -- libpcap ||
+            install_packages libpcap0.8 -- libpcap -- libpcap -- libpcap || true
     fi
     for cmd in curl od cmp wc python3; do
         command -v "$cmd" >/dev/null 2>&1 || error "Required command is still missing after installation: ${cmd}"
     done
-    # The raw carriers (quantum, nova, tun) use it to stop the kernel answering
-    # their frames with TCP resets; without it they still run, noisily.
-    command -v iptables >/dev/null 2>&1 || warn "iptables is not installed: raw carriers will not be able to suppress kernel TCP resets."
+    # The raw carriers (quantum, nova, tun) use iptables to stop the kernel answering
+    # their frames with TCP resets and `ip` to create the tun device; without them
+    # they still start, but badly.
+    command -v iptables >/dev/null 2>&1 || warn "iptables is not installed: raw transports may disconnect soon after they connect."
+    command -v ip >/dev/null 2>&1 || warn "iproute2 (ip) is not installed: the tun transport cannot create its device."
+    have_libpcap || warn "libpcap is not installed: install it (libpcap0.8 / libpcap) before starting the service."
 }
 
 ask() {
@@ -396,6 +446,9 @@ show_firewall_note() {
             echo -e "  ${YELLOW}Firewall: TCP ${port}..$((port + 255)) (raw range) and TCP ${lane} (lane).${NC}" ;;
         nova)
             echo -e "  ${YELLOW}Firewall: TCP ${port}..$((port + 255)) (raw range) and TCP ${lane} (lane).${NC}" ;;
+        tun)
+            # the lane of the tun wire sits above the service port (443 unless set)
+            echo -e "  ${YELLOW}Firewall: TCP $(lane_tcp_port "${TUN_L4_PORT:-443}") (lane; the raw wire needs no port).${NC}" ;;
     esac
 }
 
