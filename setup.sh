@@ -51,24 +51,27 @@ hr()    { printf '\n%b  %s%b\n\n' "$BOLD" "$*" "$NC"; }
 
 ensure_runtime_dependencies() {
     local missing=0 cmd
-    for cmd in curl od cmp wc python3; do
+    for cmd in curl od cmp wc python3 iptables; do
         command -v "$cmd" >/dev/null 2>&1 || missing=1
     done
     [ "$missing" -eq 0 ] && return 0
 
     info "Installing launcher download and version-list dependencies..."
     if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq && apt-get install -y -qq ca-certificates curl coreutils python3
+        apt-get update -qq && apt-get install -y -qq ca-certificates curl coreutils python3 iptables
     elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y -q ca-certificates curl coreutils python3
+        dnf install -y -q ca-certificates curl coreutils python3 iptables
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y -q ca-certificates curl coreutils python3
+        yum install -y -q ca-certificates curl coreutils python3 iptables
     else
         error "Missing curl/coreutils/python3 and no supported package manager was found."
     fi
     for cmd in curl od cmp wc python3; do
         command -v "$cmd" >/dev/null 2>&1 || error "Required command is still missing after installation: ${cmd}"
     done
+    # The raw carriers (quantum, nova, tun) use it to stop the kernel answering
+    # their frames with TCP resets; without it they still run, noisily.
+    command -v iptables >/dev/null 2>&1 || warn "iptables is not installed: raw carriers will not be able to suppress kernel TCP resets."
 }
 
 ask() {
@@ -240,8 +243,9 @@ ask_transport() {
     echo -e "  ${BOLD}Transport${NC}"
     local index=1 name
     QM_PROFILE=""
-    for name in tcp ws wss http https quantum quantum+ tun xhttp xhttps dc6 quantum-gaming; do
-        printf '   %2d) %s\n' "$index" "$name"
+    for name in tcp ws wss http https quantum quantum+ tun xhttp xhttps dc6 quantum-gaming nova; do
+        printf '   %2d) %s
+' "$index" "$name"
         index=$((index + 1))
     done
     echo ""
@@ -263,28 +267,21 @@ ask_transport() {
                 TRANSPORT="quantum"; QM_PROFILE="gaming"
                 info "Quantum Gaming is Quantum with quantum.profile=gaming. Use it on BOTH endpoints."
                 break ;;
-            *) warn "Please enter 1-12 or transport name." ;;
+            13|nova) TRANSPORT="nova"; break ;;
+            *) warn "Please enter 1-13 or transport name." ;;
         esac
     done
 }
 
 select_transport_release() {
+    # Every transport of this core (lanes, the KCP carrier of the TCP family, the
+    # lane-aware KCP control) needs the same release on BOTH ends.
     CHANNEL="release"; VERSION="latest"
-    if [ "${QM_PROFILE:-}" = gaming ]; then
-        info "Quantum Gaming: stable v4.2.8+ or beta v4.3.1+, on BOTH endpoints."
-        ask_version "$1" "v4.3.1" "v4.2.8"
-        return
-    fi
+    local min="v4.5.0"
     case "$TRANSPORT" in
-        dc6)
-            info "DC6: stable v4.2.8+ or beta v4.2.9+, on BOTH endpoints."
-            ask_version "$1" "v4.2.9" "v4.2.8"
-            ;;
-        quantum-gaming)
-            info "Quantum Gaming: stable v4.2.8+ or beta v4.3.1+, on BOTH endpoints."
-            ask_version "$1" "v4.3.1" "v4.2.8"
-            ;;
+        nova|quantum|quantum+) info "${TRANSPORT}: the same version (${min}+) is needed on BOTH endpoints." ;;
     esac
+    ask_version "$1" "$min" "$min"
     info "Version : ${VERSION} (${CHANNEL})"
 }
 
@@ -374,6 +371,32 @@ ask_dc6_address() {
         DC6_IPV6="$value"
         break
     done
+}
+
+# lane_tcp_port is the TCP port of the lanes of a raw/UDP carrier: the listen port
+# plus 256, or minus 257 at the top of the range (novaLanePort in the core).
+lane_tcp_port() {
+    local p="$1"
+    if [ $((p + 256)) -le 65535 ]; then echo $((p + 256)); else echo $((p - 257)); fi
+}
+
+# show_firewall_note says what the server's firewall must let through.
+show_firewall_note() {
+    local port="$1" lane knock
+    lane=$(lane_tcp_port "$port")
+    knock=$((port + 10000)); [ "$knock" -gt 65535 ] && knock=$((port - 1000))
+    case "$TRANSPORT" in
+        tcp|ws|wss|http|https)
+            echo -e "  ${DIM}Firewall: TCP ${port}; also UDP ${port} (the KCP carrier takes over when TCP will not connect).${NC}" ;;
+        xhttp|xhttps)
+            [ "$XHTTP_CDN" = "true" ] || echo -e "  ${DIM}Firewall: TCP ${port}; also UDP ${port} (KCP carrier).${NC}" ;;
+        quantum+)
+            echo -e "  ${YELLOW}Firewall: UDP ${port}, UDP ${knock} (knock) and TCP ${lane} (lane, used where UDP is cut).${NC}" ;;
+        quantum)
+            echo -e "  ${YELLOW}Firewall: TCP ${port}..$((port + 255)) (raw range) and TCP ${lane} (lane).${NC}" ;;
+        nova)
+            echo -e "  ${YELLOW}Firewall: TCP ${port}..$((port + 255)) (raw range) and TCP ${lane} (lane).${NC}" ;;
+    esac
 }
 
 show_new_transport_summary() {
@@ -724,7 +747,7 @@ check_ptrace_scope() {
 tune_network() {
     # Runtime owns bounded tuning; do not overwrite host policy during install.
     # In particular, never run sysctl --system (which applies unrelated files).
-    info "This core tunes kernel buffer/queue ceilings at tunnel startup (unless tuner is off)."
+    info "This core tunes kernel buffer/queue ceilings automatically at tunnel startup."
     info "Existing sysctl files, congestion control and interface queues are preserved."
 }
 
@@ -1190,7 +1213,9 @@ ask_connection_pool() {
     echo ""
     echo -e "  ${BOLD}Connection Pool:${NC}"
     echo ""
-    ask_num_range CLIENT_CONN_POOL "Connections per path" "$default_pool" 1 64
+    info "This is the MINIMUM (the core keeps at least 3). Under load the server asks for more"
+    info "carriers by itself (up to 16) and idle extra ones are closed again after a few minutes."
+    ask_num_range CLIENT_CONN_POOL "Minimum connections per path" "$default_pool" 1 64
 }
 
 ask_socks5() {
@@ -1205,75 +1230,6 @@ ask_socks5() {
         SOCKS5_ENABLED="false"
         SOCKS5_BIND=""
     fi
-}
-
-ADV_AUTO_TUNE="true"
-ADV_TUNER_MODE="auto"
-ADV_TUNER_BUDGET=128
-ADV_TUNER_MIN_BUFFER=262144
-ADV_TUNER_MAX_BUFFER=16777216
-ADV_TUNER_MIN_WINDOW=262144
-ADV_TUNER_MAX_WINDOW=8388608
-ADV_TUNER_QUEUE_MS=40
-TUN_TUNE_PROFILE="auto"
-TUN_MTU=""
-TUN_SOCK_BUF=""
-TUN_RX_QUEUE=""
-TUN_TXQUEUELEN=""
-ADV_PROFILE="auto"
-ADV_TCP_KEEPALIVE="30"
-ADV_CONN_TIMEOUT="30"
-ADV_CLEANUP_INTERVAL="3"
-ADV_TCP_READ_BUF="4194304"
-ADV_TCP_WRITE_BUF="4194304"
-ADV_UDP_BUF="4194304"
-ADV_CHANNEL_BACKLOG="4096"
-ADV_HEALTH_PROBE_SEC="10"
-ADV_HEALTH_PROBE_TIMEOUT_MS="3000"
-ADV_HEALTH_MAX_MISSED="4"
-ADV_HANDSHAKE_TIMEOUT_SEC="30"
-
-apply_profile() {
-    local p="$1"
-    ADV_PROFILE="$p"
-    case "$p" in
-        stable)
-            ADV_TCP_READ_BUF="4194304"   ADV_TCP_WRITE_BUF="4194304"
-            ADV_UDP_BUF="4194304"
-            ADV_CHANNEL_BACKLOG="4096"
-            ADV_TCP_KEEPALIVE="30"       ADV_CONN_TIMEOUT="30"
-            ADV_CLEANUP_INTERVAL="3"
-            ADV_HEALTH_PROBE_SEC="10"    ADV_HEALTH_PROBE_TIMEOUT_MS="3000"
-            ADV_HEALTH_MAX_MISSED="4"    ADV_HANDSHAKE_TIMEOUT_SEC="30"
-            ;;
-        aggressive)
-            ADV_TCP_READ_BUF="16777216"  ADV_TCP_WRITE_BUF="16777216"
-            ADV_UDP_BUF="16777216"
-            ADV_CHANNEL_BACKLOG="8192"
-            ADV_TCP_KEEPALIVE="30"       ADV_CONN_TIMEOUT="60"
-            ADV_CLEANUP_INTERVAL="5"
-            ADV_HEALTH_PROBE_SEC="10"    ADV_HEALTH_PROBE_TIMEOUT_MS="3000"
-            ADV_HEALTH_MAX_MISSED="4"    ADV_HANDSHAKE_TIMEOUT_SEC="30"
-            ;;
-        low_latency)
-            ADV_TCP_READ_BUF="2097152"   ADV_TCP_WRITE_BUF="2097152"
-            ADV_UDP_BUF="2097152"
-            ADV_CHANNEL_BACKLOG="2048"
-            ADV_TCP_KEEPALIVE="20"       ADV_CONN_TIMEOUT="20"
-            ADV_CLEANUP_INTERVAL="2"
-            ADV_HEALTH_PROBE_SEC="8"     ADV_HEALTH_PROBE_TIMEOUT_MS="2500"
-            ADV_HEALTH_MAX_MISSED="4"    ADV_HANDSHAKE_TIMEOUT_SEC="30"
-            ;;
-        low_hardware)
-            ADV_TCP_READ_BUF="524288"    ADV_TCP_WRITE_BUF="524288"
-            ADV_UDP_BUF="524288"
-            ADV_CHANNEL_BACKLOG="512"
-            ADV_TCP_KEEPALIVE="30"       ADV_CONN_TIMEOUT="30"
-            ADV_CLEANUP_INTERVAL="3"
-            ADV_HEALTH_PROBE_SEC="15"    ADV_HEALTH_PROBE_TIMEOUT_MS="4000"
-            ADV_HEALTH_MAX_MISSED="4"    ADV_HANDSHAKE_TIMEOUT_SEC="45"
-            ;;
-    esac
 }
 
 ask_num_range() {
@@ -1364,13 +1320,6 @@ ask_server_endpoint() {
     done
 }
 
-ask_tun_custom() {
-    ask_num_range TUN_MTU "MTU (bytes)" 1380 576 9000
-    ask_num_range TUN_SOCK_BUF "Capture buffer (bytes)" 4194304 262144 67108864
-    ask_num_range TUN_RX_QUEUE "Receive queue (frames)" 512 64 8192
-    ask_num_range TUN_TXQUEUELEN "Transmit queue (packets)" 500 10 10000
-}
-
 ask_tun_liveness() {
     local device_default
     device_default="dc$(printf '%s' "$SERVICE_NAME" | cksum | awk '{print $1}')"
@@ -1384,171 +1333,6 @@ ask_tun_liveness() {
     local default_idle=90
     [ "$default_idle" -lt "$min_idle" ] && default_idle=$min_idle
     ask_num_range TUN_IDLE_TIMEOUT_SEC "Peer silence before confirmation (sec)" "$default_idle" "$min_idle" 3600
-}
-
-ask_tun_profile() {
-    echo ""
-    echo -e "  ${BOLD}TUN Performance Profile:${NC}"
-    printf '    1) auto\n    2) stable\n    3) speed\n    4) gaming\n    5) custom\n'
-    echo ""
-    TUN_MTU=""; TUN_SOCK_BUF=""; TUN_RX_QUEUE=""; TUN_TXQUEUELEN=""
-    while true; do
-        ask TUN_PROF_CHOICE "TUN profile" "1"
-        case "$TUN_PROF_CHOICE" in
-            1|auto)   TUN_TUNE_PROFILE="auto"; break ;;
-            2|stable) TUN_TUNE_PROFILE="stable"; break ;;
-            3|speed)  TUN_TUNE_PROFILE="speed"; break ;;
-            4|gaming) TUN_TUNE_PROFILE="gaming"; break ;;
-            5|custom) TUN_TUNE_PROFILE="custom"; ask_tun_custom; break ;;
-            *) warn "Choose 1-5." ;;
-        esac
-    done
-    warn "Match the TUN profile on both ends."
-}
-
-ask_advanced() {
-    ADV_UDP_FLOW_TIMEOUT=300
-    ADV_WS_READ_BUF=131072
-    ADV_WS_WRITE_BUF=131072
-    ADV_TUNER_BUDGET=128
-    ADV_TUNER_MIN_BUFFER=262144
-    ADV_TUNER_MAX_BUFFER=16777216
-    ADV_TUNER_MIN_WINDOW=262144
-    ADV_TUNER_MAX_WINDOW=8388608
-    ADV_TUNER_QUEUE_MS=40
-    echo ""
-    echo -e "  ${BOLD}Tuner Mode:${NC}"
-    printf '    1) auto\n    2) balanced\n    3) aggressive\n    4) low_latency\n    5) low_memory\n    6) custom\n'
-    echo ""
-    while true; do
-        ask ADV_CHOICE "Tuner mode" "1"
-        case "$ADV_CHOICE" in
-            1|auto|2|stable|balanced|3|aggressive|4|low_latency|5|low_hardware|low_memory|6|custom) break ;;
-            *) warn "Choose 1-6." ;;
-        esac
-    done
-    echo ""
-    case "$ADV_CHOICE" in
-        1|auto)
-            ADV_TUNER_MODE="auto"
-            ADV_AUTO_TUNE="true"
-            apply_profile "stable"
-            ;;
-        2|stable|balanced)
-            ADV_TUNER_MODE="balanced"
-            ADV_AUTO_TUNE="true"
-            apply_profile "stable"
-            ;;
-        3|aggressive)
-            ADV_TUNER_MODE="aggressive"
-            ADV_AUTO_TUNE="true"
-            apply_profile "aggressive"
-            ;;
-        4|low_latency)
-            ADV_TUNER_MODE="low_latency"
-            ADV_TUNER_QUEUE_MS=10
-            ADV_AUTO_TUNE="true"
-            apply_profile "low_latency"
-            ;;
-        5|low_hardware|low_memory)
-            ADV_TUNER_MODE="low_memory"
-            ADV_TUNER_QUEUE_MS=20
-            ADV_AUTO_TUNE="true"
-            apply_profile "low_hardware"
-            ;;
-        6|custom)
-            ADV_TUNER_MODE="off"
-            ADV_AUTO_TUNE="false"
-            ADV_PROFILE="custom"
-            echo -e "  ${BOLD}Timeouts & Intervals:${NC}"
-            ask_num_range ADV_TCP_KEEPALIVE "tcp_keepalive (sec)" 30 1 3600
-            ask_num_range ADV_CONN_TIMEOUT "connection_timeout (sec)" 30 1 300
-            ask_num_range ADV_CLEANUP_INTERVAL "cleanup_interval (sec)" 3 1 60
-            echo ""
-            echo -e "  ${BOLD}Connection health${NC}"
-            ask_num_range ADV_HEALTH_PROBE_SEC "health_probe_sec (sec)" 10 1 300
-            ask_num_range ADV_HEALTH_PROBE_TIMEOUT_MS "health_probe_timeout_ms (ms)" 3000 300 60000
-            ask_num_range ADV_HEALTH_MAX_MISSED "health_max_missed (count)" 4 2 20
-            ask_num_range ADV_HANDSHAKE_TIMEOUT_SEC "handshake_timeout_sec (sec)" 30 5 300
-            echo ""
-            echo -e "  ${BOLD}Buffers  (bytes, e.g. 4194304 = 4MB):${NC}"
-            ask_num_range ADV_TCP_READ_BUF "tcp_read_buffer (bytes)" 4194304 65536 67108864
-            ask_num_range ADV_TCP_WRITE_BUF "tcp_write_buffer (bytes)" 4194304 65536 67108864
-            ask_num_range ADV_UDP_BUF "udp_buffer_size (bytes)" 4194304 65536 67108864
-            echo ""
-            echo -e "  ${BOLD}Channel / Stream sizes:${NC}"
-            ask_num_range ADV_CHANNEL_BACKLOG "channel_backlog (count)" 4096 64 16384
-            ;;
-        *)
-            ADV_TUNER_MODE="auto"
-            ADV_AUTO_TUNE="true"
-            apply_profile "stable"
-            ;;
-    esac
-    if [ "$ADV_TUNER_MODE" = "off" ]; then
-        ask_num_range ADV_UDP_FLOW_TIMEOUT "UDP flow idle timeout (sec)" 300 10 86400
-        if [ "$TRANSPORT" = "ws" ] || [ "$TRANSPORT" = "wss" ]; then
-            ask_num_range ADV_WS_READ_BUF "WebSocket read buffer (bytes)" 131072 4096 4194304
-            ask_num_range ADV_WS_WRITE_BUF "WebSocket write buffer (bytes)" 131072 4096 4194304
-        fi
-    fi
-    if [ "$ADV_TUNER_MODE" != "off" ]; then
-        local tune_limits
-        ask tune_limits "Customize adaptive safety limits? (y/n)" "n"
-        case "$tune_limits" in
-            y|Y|yes)
-                ask_num_range ADV_TUNER_BUDGET "Estimated tuning budget (MB, per process)" 128 8 1024
-                ask_num_range ADV_TUNER_MIN_BUFFER "Minimum socket buffer (bytes, safety may reduce)" 262144 65536 16777216
-                ask_num_range ADV_TUNER_MAX_BUFFER "Maximum socket buffer (bytes)" 16777216 "$ADV_TUNER_MIN_BUFFER" 16777216
-                ask_num_range ADV_TUNER_MIN_WINDOW "Minimum DC window (bytes, safety may reduce)" 262144 262144 8388608
-                ask_num_range ADV_TUNER_MAX_WINDOW "Maximum DC stream window (bytes)" 8388608 "$ADV_TUNER_MIN_WINDOW" 8388608
-                ask_num_range ADV_TUNER_QUEUE_MS "Queue delay target (ms, not a guarantee)" "$ADV_TUNER_QUEUE_MS" 5 250
-                ;;
-        esac
-        if [ "$TRANSPORT" = "tun" ]; then
-            info "Live TUN buffers require TUN profile=auto and no explicit rx_queue/sock_buf."
-        fi
-        info "Explicit dc.window_bytes remains fixed; choose DC Auto for a live window."
-    fi
-    info "Tuner Profile : ${ADV_PROFILE}$([ "$ADV_AUTO_TUNE" = "true" ] && echo " (adaptive)" || echo " (fixed)")"
-}
-
-build_advanced_json() {
-    printf '  "tuner": {"mode":"%s","memory_budget_mb":%s,"min_buffer_bytes":%s,"max_buffer_bytes":%s,"min_window_bytes":%s,"max_window_bytes":%s,"queue_delay_ms":%s},\n' \
-        "$ADV_TUNER_MODE" "$ADV_TUNER_BUDGET" "$ADV_TUNER_MIN_BUFFER" "$ADV_TUNER_MAX_BUFFER" "$ADV_TUNER_MIN_WINDOW" "$ADV_TUNER_MAX_WINDOW" "$ADV_TUNER_QUEUE_MS"
-    printf '  "advanced": {
-'
-    printf '    "udp_flow_timeout": %s,\n' "${ADV_UDP_FLOW_TIMEOUT:-300}"
-    if [ "$ADV_TUNER_MODE" = "off" ] && { [ "$TRANSPORT" = "ws" ] || [ "$TRANSPORT" = "wss" ]; }; then
-        printf '    "websocket_read_buffer": %s,\n    "websocket_write_buffer": %s,\n' "${ADV_WS_READ_BUF:-131072}" "${ADV_WS_WRITE_BUF:-131072}"
-    fi
-    printf '    "auto_tune": %s,
-'          "$ADV_AUTO_TUNE"
-    printf '    "tcp_nodelay": true,
-'
-    printf '    "tcp_keepalive": %s,
-'      "$ADV_TCP_KEEPALIVE"
-    printf '    "connection_timeout": %s,
-' "$ADV_CONN_TIMEOUT"
-    printf '    "cleanup_interval": %s,
-'   "$ADV_CLEANUP_INTERVAL"
-    printf '    "tcp_read_buffer": %s,
-'    "$ADV_TCP_READ_BUF"
-    printf '    "tcp_write_buffer": %s,
-'   "$ADV_TCP_WRITE_BUF"
-    printf '    "udp_buffer_size": %s,
-'    "$ADV_UDP_BUF"
-    printf '    "channel_backlog": %s,
-'    "$ADV_CHANNEL_BACKLOG"
-    printf '    "health_probe_sec": %s,
-' "$ADV_HEALTH_PROBE_SEC"
-    printf '    "health_probe_timeout_ms": %s,
-' "$ADV_HEALTH_PROBE_TIMEOUT_MS"
-    printf '    "health_max_missed": %s,
-' "$ADV_HEALTH_MAX_MISSED"
-    printf '    "handshake_timeout_sec": %s
-' "$ADV_HANDSHAKE_TIMEOUT_SEC"
-    printf '  }'
 }
 
 build_socks5_json() {
@@ -1567,114 +1351,15 @@ build_socks5_yaml() {
 " "$SOCKS5_ENABLED" "$SOCKS5_BIND"
 }
 
-build_advanced_yaml() {
-    printf 'tuner:\n  mode: "%s"\n  memory_budget_mb: %s\n  min_buffer_bytes: %s\n  max_buffer_bytes: %s\n  min_window_bytes: %s\n  max_window_bytes: %s\n  queue_delay_ms: %s\n\n' \
-        "$ADV_TUNER_MODE" "$ADV_TUNER_BUDGET" "$ADV_TUNER_MIN_BUFFER" "$ADV_TUNER_MAX_BUFFER" "$ADV_TUNER_MIN_WINDOW" "$ADV_TUNER_MAX_WINDOW" "$ADV_TUNER_QUEUE_MS"
-    printf "advanced:
-"
-    printf '  udp_flow_timeout: %s\n' "${ADV_UDP_FLOW_TIMEOUT:-300}"
-    if [ "$ADV_TUNER_MODE" = "off" ] && { [ "$TRANSPORT" = "ws" ] || [ "$TRANSPORT" = "wss" ]; }; then
-        printf '  websocket_read_buffer: %s\n  websocket_write_buffer: %s\n' "${ADV_WS_READ_BUF:-131072}" "${ADV_WS_WRITE_BUF:-131072}"
-    fi
-    printf "  auto_tune: %s
-"          "$ADV_AUTO_TUNE"
-    printf "  tcp_nodelay: true
-"
-    printf "  tcp_keepalive: %s
-"      "$ADV_TCP_KEEPALIVE"
-    printf "  connection_timeout: %s
-" "$ADV_CONN_TIMEOUT"
-    printf "  cleanup_interval: %s
-"   "$ADV_CLEANUP_INTERVAL"
-    printf "  tcp_read_buffer: %s
-"    "$ADV_TCP_READ_BUF"
-    printf "  tcp_write_buffer: %s
-"   "$ADV_TCP_WRITE_BUF"
-    printf "  udp_buffer_size: %s
-"    "$ADV_UDP_BUF"
-    printf "  channel_backlog: %s
-"    "$ADV_CHANNEL_BACKLOG"
-    printf "  health_probe_sec: %s
-" "$ADV_HEALTH_PROBE_SEC"
-    printf "  health_probe_timeout_ms: %s
-" "$ADV_HEALTH_PROBE_TIMEOUT_MS"
-    printf "  health_max_missed: %s
-" "$ADV_HEALTH_MAX_MISSED"
-    printf "  handshake_timeout_sec: %s
-" "$ADV_HANDSHAKE_TIMEOUT_SEC"
-}
-
-dc_applies() {
-    case "$TRANSPORT" in
-        tun) return 1 ;;
-        *) return 0 ;;
-    esac
-}
-
+# Sizes (buffers, windows, queues), the tuner and the carrier counts belong to the
+# core: it measures the host and the path and ignores such settings in a
+# configuration, so none is written. Only the profile id is.
 build_dc_json() {
-    printf '  "profile_id": "%s",\n' "${PAIR_PROFILE_ID:-default}"
-    dc_applies || return 0
-    [ "$DC_PROFILE" = "auto" ] && return 0
-    printf '  "dc": {
-    "streams_per_carrier": %s,
-    "max_carriers": %s,
-    "window_bytes": %s
-  },
-' "$DC_STREAMS" "$DC_CARRIERS" "$DC_WINDOW"
+    printf '  "profile_id": "%s"\n' "${PAIR_PROFILE_ID:-default}"
 }
 
 build_dc_yaml() {
     printf 'profile_id: "%s"\n' "${PAIR_PROFILE_ID:-default}"
-    dc_applies || return 0
-    [ "$DC_PROFILE" = "auto" ] && return 0
-    printf 'dc:
-  streams_per_carrier: %s
-  max_carriers: %s
-  window_bytes: %s
-
-' "$DC_STREAMS" "$DC_CARRIERS" "$DC_WINDOW"
-}
-
-ask_dc() {
-    DC_PROFILE="auto"; DC_STREAMS=8; DC_CARRIERS=32; DC_WINDOW=1048576
-
-    if ! dc_applies; then
-        return
-    fi
-
-    echo ""
-    echo -e "  ${BOLD}Connection profile${NC}"
-    echo ""
-    echo "    1) Balanced"
-    echo "    2) Stability"
-    echo "    3) Speed"
-    echo "    4) Custom"
-    echo ""
-    while true; do
-        ask DC_CHOICE "Profile" "1"
-        case "$DC_CHOICE" in
-            1|balanced|auto)
-                DC_PROFILE="auto"
-                break ;;
-            2|stability|stable)
-                DC_PROFILE="stable"; DC_STREAMS=4; DC_CARRIERS=16; DC_WINDOW=1048576
-                break ;;
-            3|speed|fast)
-                DC_PROFILE="speed"; DC_STREAMS=12; DC_CARRIERS=16; DC_WINDOW=2097152
-                break ;;
-            4|custom)
-                DC_PROFILE="custom"
-                ask_num_range DC_STREAMS "Connections per carrier" 8 1 64
-                ask_num_range DC_CARRIERS "Maximum carriers" 32 2 64
-                while true; do
-                    ask_num_range DC_WINDOW "Per-stream receive window (bytes, 0 = adaptive)" 0 0 8388608
-                    [ "$DC_WINDOW" -eq 0 ] || [ "$DC_WINDOW" -ge 262144 ] && break
-                    warn "Use 0 for adaptive, or 262144..8388608 for a fixed window."
-                done
-                break ;;
-            *) warn "Please enter 1-4." ;;
-        esac
-    done
 }
 
 write_native_dc_config() {
@@ -1683,7 +1368,7 @@ write_native_dc_config() {
     local role="$1" transport="$2" endpoint="$3" license_addr="$4" ipv6_addr="$5" psk="$6"
     shift 6
     local common maps socks tmp
-    common="{$(build_dc_json)$(build_advanced_json)}"
+    common="{$(build_dc_json)}"
     maps=$(build_ports_json "$@") || error "Invalid port mapping; config unchanged."
     maps="[$maps]"
     socks="{$(build_socks5_json)\"_end\":0}"
@@ -1771,7 +1456,7 @@ write_server_config_tcp() {
       ]
     }
   ],
-' "$psk" "$port" "$ports_json"; build_socks5_json; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$ports_json"; build_socks5_json; build_dc_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: tcp
@@ -1782,9 +1467,31 @@ listeners:
     transport: tcp
     maps:
 %s
-' "$psk" "$port" "$ports_yaml"; build_socks5_yaml; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$ports_yaml"; build_socks5_yaml; build_dc_yaml; } > "$CONFIG"
     fi
 }
+
+finalize_nova_config() {
+    python3 - "$CONFIG" "$CONFIG_FMT" <<'PY'
+import json, re, sys
+file, fmt = sys.argv[1:]
+text = open(file, encoding="utf-8").read()
+# Packet size, windows and buffers are chosen by the core (nova section stays absent).
+if fmt == "json":
+    data = json.loads(text)
+    data["transport"] = "nova"
+    for entry in data.get("listeners", []) + data.get("paths", []):
+        entry["transport"] = "nova"
+    text = json.dumps(data, indent=2) + "\n"
+else:
+    text = re.sub(r'(?m)^(\s*(?:- )?transport:)\s*"?tcp"?\s*$', r'\1 nova', text)
+with open(file, "w", encoding="utf-8") as out:
+    out.write(text)
+PY
+}
+
+write_server_config_nova() { write_server_config_tcp "$@" && finalize_nova_config; }
+write_client_config_nova() { write_client_config_tcp "$@" && finalize_nova_config; }
 
 write_client_config_tcp() {
     local server_ip="$1" server_port="$2" psk="$3"
@@ -1804,7 +1511,7 @@ write_client_config_tcp() {
       "dial_timeout": 10
     }
   ],
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_dc_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: tcp
@@ -1817,7 +1524,7 @@ paths:
     retry_interval: 3
     dial_timeout: 10
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_dc_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1846,7 +1553,7 @@ write_server_config_ws() {
   "ws_settings": {
     "path": "%s"
   },
-' "$psk" "$port" "$ports_json" "$ws_path"; build_socks5_json; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$ports_json" "$ws_path"; build_socks5_json; build_dc_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: ws
@@ -1860,7 +1567,7 @@ listeners:
 ws_settings:
   path: "%s"
 
-' "$psk" "$port" "$ports_yaml" "$ws_path"; build_socks5_yaml; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$ports_yaml" "$ws_path"; build_socks5_yaml; build_dc_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1885,7 +1592,7 @@ write_client_config_ws() {
   "ws_settings": {
     "path": "%s"
   },
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_dc_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: ws
@@ -1901,7 +1608,7 @@ paths:
 ws_settings:
   path: "%s"
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_dc_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1932,7 +1639,7 @@ write_server_config_wss() {
   "ws_settings": {
     "path": "%s"
   },
-' "$psk" "$port" "$cert" "$key" "$ports_json" "$ws_path"; build_socks5_json; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$cert" "$key" "$ports_json" "$ws_path"; build_socks5_json; build_dc_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: wss
@@ -1948,7 +1655,7 @@ listeners:
 ws_settings:
   path: "%s"
 
-' "$psk" "$port" "$cert" "$key" "$ports_yaml" "$ws_path"; build_socks5_yaml; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$cert" "$key" "$ports_yaml" "$ws_path"; build_socks5_yaml; build_dc_yaml; } > "$CONFIG"
     fi
 }
 
@@ -1973,7 +1680,7 @@ write_client_config_wss() {
   "ws_settings": {
     "path": "%s"
   },
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_dc_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: wss
@@ -1990,7 +1697,7 @@ ws_settings:
   path: "%s"
 
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$ws_path"; build_dc_yaml; } > "$CONFIG"
     fi
 }
 
@@ -2020,7 +1727,7 @@ write_server_config_http() {
     "fake_domain": "%s",
     "path": "%s"
   },
-' "$psk" "$port" "$ports_json" "$http_domain" "$http_path"; build_socks5_json; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$ports_json" "$http_domain" "$http_path"; build_socks5_json; build_dc_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: http
@@ -2035,7 +1742,7 @@ http_settings:
   fake_domain: "%s"
   path: "%s"
 
-' "$psk" "$port" "$ports_yaml" "$http_domain" "$http_path"; build_socks5_yaml; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$ports_yaml" "$http_domain" "$http_path"; build_socks5_yaml; build_dc_yaml; } > "$CONFIG"
     fi
 }
 
@@ -2133,7 +1840,7 @@ write_server_config_xhttp() {
 ' "$transport" "$psk" "$cert_json" "$port" "$ports_json" "$path" \
   "$XHTTP_UP_MAX_BYTES" "$up_concurrency" "$XHTTP_BUFFER_BYTES" "$XHTTP_PROBE_MS" "$XHTTP_SOCKET_BUF_BYTES"
         fi
-        build_socks5_json; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+        build_socks5_json; build_dc_json; printf '}\n'; } > "$CONFIG"
     else
         {
         if [ "$cdn" = "true" ]; then
@@ -2188,7 +1895,7 @@ xhttp:
 ' "$transport" "$psk" "$cert_yaml" "$port" "$ports_yaml" "$path" \
   "$XHTTP_UP_MAX_BYTES" "$up_concurrency" "$XHTTP_BUFFER_BYTES" "$XHTTP_PROBE_MS" "$XHTTP_SOCKET_BUF_BYTES"
         fi
-        build_socks5_yaml; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
+        build_socks5_yaml; build_dc_yaml; } > "$CONFIG"
     fi
 }
 
@@ -2276,7 +1983,7 @@ write_client_config_xhttp() {
 ' "$transport" "$psk" "$addr" "$CLIENT_CONN_POOL" "$path" "$mode" \
   "$XHTTP_UP_MAX_BYTES" "$up_concurrency" "$XHTTP_BUFFER_BYTES" "$XHTTP_PROBE_MS" "$XHTTP_SOCKET_BUF_BYTES" "$insecure"
         fi
-        build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+        build_dc_json; printf '}\n'; } > "$CONFIG"
     else
         {
         if [ "$cdn" = "true" ]; then
@@ -2331,7 +2038,7 @@ xhttp:
 ' "$transport" "$psk" "$addr" "$CLIENT_CONN_POOL" "$path" "$mode" \
   "$XHTTP_UP_MAX_BYTES" "$up_concurrency" "$XHTTP_BUFFER_BYTES" "$XHTTP_PROBE_MS" "$XHTTP_SOCKET_BUF_BYTES" "$insecure"
         fi
-        build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
+        build_dc_yaml; } > "$CONFIG"
     fi
 }
 
@@ -2363,7 +2070,7 @@ write_server_config_https() {
     "fake_domain": "%s",
     "path": "%s"
   },
-' "$psk" "$port" "$cert" "$key" "$ports_json" "$http_domain" "$http_path"; build_socks5_json; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$cert" "$key" "$ports_json" "$http_domain" "$http_path"; build_socks5_json; build_dc_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: https
@@ -2380,7 +2087,7 @@ http_settings:
   fake_domain: "%s"
   path: "%s"
 
-' "$psk" "$port" "$cert" "$key" "$ports_yaml" "$http_domain" "$http_path"; build_socks5_yaml; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$cert" "$key" "$ports_yaml" "$http_domain" "$http_path"; build_socks5_yaml; build_dc_yaml; } > "$CONFIG"
     fi
 }
 
@@ -2406,7 +2113,7 @@ write_client_config_https() {
     "fake_domain": "%s",
     "path": "%s"
   },
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_dc_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: https
@@ -2424,7 +2131,7 @@ http_settings:
   path: "%s"
 
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_dc_yaml; } > "$CONFIG"
     fi
 }
 
@@ -2454,7 +2161,7 @@ write_server_config_quantum() {
     "mtu": %s,
     "block": "%s"%s
   },
-' "$psk" "$port" "$ports_json" "$mtu" "$block" "$(quantum_profile_json)"; build_socks5_json; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$ports_json" "$mtu" "$block" "$(quantum_profile_json)"; build_socks5_json; build_dc_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: quantum
@@ -2469,7 +2176,7 @@ quantum:
   mtu: %s
   block: "%s"%s
 
-' "$psk" "$port" "$ports_yaml" "$mtu" "$block" "$(quantum_profile_yaml)"; build_socks5_yaml; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$ports_yaml" "$mtu" "$block" "$(quantum_profile_yaml)"; build_socks5_yaml; build_dc_yaml; } > "$CONFIG"
     fi
 }
 
@@ -2495,7 +2202,7 @@ write_client_config_quantum() {
     "mtu": %s,
     "block": "%s"%s
   },
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$mtu" "$block" "$(quantum_profile_json)"; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$mtu" "$block" "$(quantum_profile_json)"; build_dc_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: quantum
@@ -2512,7 +2219,7 @@ quantum:
   mtu: %s
   block: "%s"%s
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$mtu" "$block" "$(quantum_profile_yaml)"; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$mtu" "$block" "$(quantum_profile_yaml)"; build_dc_yaml; } > "$CONFIG"
     fi
 }
 
@@ -2538,7 +2245,7 @@ write_server_config_quantumplus() {
       ]
     }
   ],
-' "$psk" "$port" "$ports_json"; build_socks5_json; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$port" "$ports_json"; build_socks5_json; build_dc_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: server
 transport: "quantum+"
@@ -2549,7 +2256,7 @@ listeners:
     transport: "quantum+"
     maps:
 %s
-' "$psk" "$port" "$ports_yaml"; build_socks5_yaml; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$port" "$ports_yaml"; build_socks5_yaml; build_dc_yaml; } > "$CONFIG"
     fi
 }
 
@@ -2571,7 +2278,7 @@ write_client_config_quantumplus() {
       "dial_timeout": 10
     }
   ],
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_dc_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: "quantum+"
@@ -2584,7 +2291,7 @@ paths:
     retry_interval: 3
     dial_timeout: 10
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL"; build_dc_yaml; } > "$CONFIG"
     fi
 }
 
@@ -2610,7 +2317,7 @@ write_client_config_http() {
     "fake_domain": "%s",
     "path": "%s"
   },
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_dc_json; build_advanced_json; printf '}\n'; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_dc_json; printf '}\n'; } > "$CONFIG"
     else
         {         printf 'mode: client
 transport: http
@@ -2627,7 +2334,7 @@ http_settings:
   fake_domain: "%s"
   path: "%s"
 
-' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_dc_yaml; build_advanced_yaml; } > "$CONFIG"
+' "$psk" "$server_ip" "$server_port" "$CLIENT_CONN_POOL" "$http_domain" "$http_path"; build_dc_yaml; } > "$CONFIG"
     fi
 }
 
@@ -2680,16 +2387,8 @@ write_server_config_tun() {
 '     "$local_addr"
             printf '    "remote_addr": "%s",
 '    "$remote_addr"
-            printf '    "profile": "%s",
-' "$TUN_TUNE_PROFILE"
             printf '    "encrypt": true,
 '
-            [ -n "$TUN_MTU"        ] && printf '    "mtu": %s,
-' "$TUN_MTU"
-            [ -n "$TUN_RX_QUEUE"   ] && printf '    "rx_queue": %s,
-' "$TUN_RX_QUEUE"
-            [ -n "$TUN_TXQUEUELEN" ] && printf '    "tx_queue_len": %s,
-' "$TUN_TXQUEUELEN"
             printf '    "heartbeat_sec": %s,
 ' "$heartbeat_sec"
             printf '    "idle_timeout_sec": %s
@@ -2717,12 +2416,11 @@ write_server_config_tun() {
             [ -n "$spoof_dst" ] && printf '    "spoof_dst_ip": "%s",
 ' "$spoof_dst"
             printf '    "sock_buf": %s
-' "${TUN_SOCK_BUF:-0}"
+' 0
             printf '  },
 '
             build_socks5_json
             build_dc_json
-            build_advanced_json
             printf '}
 '
         } > "$CONFIG"
@@ -2759,16 +2457,8 @@ write_server_config_tun() {
 '    "$local_addr"
             printf '  remote_addr: "%s"
 '   "$remote_addr"
-            printf '  profile: "%s"
-' "$TUN_TUNE_PROFILE"
             printf '  encrypt: true
 '
-            [ -n "$TUN_MTU"        ] && printf '  mtu: %s
-' "$TUN_MTU"
-            [ -n "$TUN_RX_QUEUE"   ] && printf '  rx_queue: %s
-' "$TUN_RX_QUEUE"
-            [ -n "$TUN_TXQUEUELEN" ] && printf '  tx_queue_len: %s
-' "$TUN_TXQUEUELEN"
             printf '  heartbeat_sec: %s
 ' "$heartbeat_sec"
             printf '  idle_timeout_sec: %s
@@ -2796,10 +2486,9 @@ write_server_config_tun() {
 ' "$spoof_dst"
             printf '  sock_buf: %s
 
-' "${TUN_SOCK_BUF:-0}"
+' 0
             build_socks5_yaml
             build_dc_yaml
-            build_advanced_yaml
         } > "$CONFIG"
     fi
 }
@@ -2848,16 +2537,8 @@ write_client_config_tun() {
 '     "$local_addr"
             printf '    "remote_addr": "%s",
 '    "$remote_addr"
-            printf '    "profile": "%s",
-' "$TUN_TUNE_PROFILE"
             printf '    "encrypt": true,
 '
-            [ -n "$TUN_MTU"        ] && printf '    "mtu": %s,
-' "$TUN_MTU"
-            [ -n "$TUN_RX_QUEUE"   ] && printf '    "rx_queue": %s,
-' "$TUN_RX_QUEUE"
-            [ -n "$TUN_TXQUEUELEN" ] && printf '    "tx_queue_len": %s,
-' "$TUN_TXQUEUELEN"
             printf '    "heartbeat_sec": %s,
 ' "$heartbeat_sec"
             printf '    "idle_timeout_sec": %s
@@ -2885,11 +2566,10 @@ write_client_config_tun() {
             [ -n "$spoof_dst" ] && printf '    "spoof_dst_ip": "%s",
 ' "$spoof_dst"
             printf '    "sock_buf": %s
-' "${TUN_SOCK_BUF:-0}"
+' 0
             printf '  },
 '
             build_dc_json
-            build_advanced_json
             printf '}
 '
         } > "$CONFIG"
@@ -2924,16 +2604,8 @@ write_client_config_tun() {
 '    "$local_addr"
             printf '  remote_addr: "%s"
 '   "$remote_addr"
-            printf '  profile: "%s"
-' "$TUN_TUNE_PROFILE"
             printf '  encrypt: true
 '
-            [ -n "$TUN_MTU"        ] && printf '  mtu: %s
-' "$TUN_MTU"
-            [ -n "$TUN_RX_QUEUE"   ] && printf '  rx_queue: %s
-' "$TUN_RX_QUEUE"
-            [ -n "$TUN_TXQUEUELEN" ] && printf '  tx_queue_len: %s
-' "$TUN_TXQUEUELEN"
             printf '  heartbeat_sec: %s
 ' "$heartbeat_sec"
             printf '  idle_timeout_sec: %s
@@ -2961,9 +2633,8 @@ write_client_config_tun() {
 ' "$spoof_dst"
             printf '  sock_buf: %s
 
-' "${TUN_SOCK_BUF:-0}"
+' 0
             build_dc_yaml
-            build_advanced_yaml
         } > "$CONFIG"
     fi
 }
@@ -3059,7 +2730,7 @@ install_server() {
     echo ""
 
     ask_transport
-    select_transport_release server
+    select_transport_release server || return 1
     echo ""
 
     if [ "$TRANSPORT" = "tun" ]; then
@@ -3120,7 +2791,6 @@ install_server() {
             echo ""
             ask TUN_IFACE "Network interface  (leave empty for auto-detect)" ""
             ask_tun_liveness
-            ask_tun_profile
             echo ""
             ask TUN_DCPI_CHOICE "Enable DCPI (IPv4/proto58) (y/n)" "n"
             [ "$TUN_DCPI_CHOICE" = "y" ] || [ "$TUN_DCPI_CHOICE" = "Y" ] && TUN_DCPI="yes" || TUN_DCPI="no"
@@ -3150,12 +2820,12 @@ install_server() {
     ask_socks5
     echo ""
 
-    ask_dc
-    ask_advanced
+    info "Bandwidth, buffers, windows, carrier counts : automatic (the core measures the path)"
     echo ""
 
     case "$TRANSPORT" in
         dc6)     write_server_config_dc6 "$PORT" "$PSK" "$DC6_IPV6" "${PORTS[@]}" ;;
+        nova)    write_server_config_nova "$PORT" "$PSK" "${PORTS[@]}" || return 1 ;;
         tcp)     write_server_config_tcp     "$PORT" "$PSK" "${PORTS[@]}" ;;
         ws)      write_server_config_ws      "$PORT" "$PSK" "$WS_PATH" "${PORTS[@]}" ;;
         wss)     write_server_config_wss     "$PORT" "$PSK" "$WS_PATH" "$CERT_FILE" "$KEY_FILE" "${PORTS[@]}" ;;
@@ -3216,9 +2886,7 @@ install_server() {
             echo -e "  Profile   : ${BOLD}gaming${NC}  ${DIM}(set it on both endpoints)${NC}"
         fi
     fi
-    if [ "$TRANSPORT" = "quantum+" ]; then
-        echo -e "  ${YELLOW}Open UDP ${PORT} AND UDP $((PORT + 10000)) (knock port) in your firewall.${NC}"
-    fi
+    show_firewall_note "$PORT"
     if [ "$TRANSPORT" = "xhttp" ] || [ "$TRANSPORT" = "xhttps" ]; then
         echo -e "  URL path  : ${BOLD}${XHTTP_PATH}${NC}  ${DIM}(the other side must use the same one)${NC}"
         if [ "$XHTTP_CDN" = "true" ]; then
@@ -3265,7 +2933,7 @@ install_client() {
     echo ""
 
     ask_transport
-    select_transport_release client
+    select_transport_release client || return 1
     echo ""
 
     if [ "$TRANSPORT" != "tun" ] && [ "$TRANSPORT" != "xhttp" ] && [ "$TRANSPORT" != "xhttps" ]; then
@@ -3354,7 +3022,6 @@ install_client() {
             echo ""
             ask TUN_IFACE "Network interface  (leave empty for auto-detect)" ""
             ask_tun_liveness
-            ask_tun_profile
             echo ""
             ask TUN_DCPI_CHOICE "Enable DCPI (IPv4/proto58) (y/n)" "n"
             [ "$TUN_DCPI_CHOICE" = "y" ] || [ "$TUN_DCPI_CHOICE" = "Y" ] && TUN_DCPI="yes" || TUN_DCPI="no"
@@ -3376,12 +3043,12 @@ install_client() {
         echo ""
     fi
 
-    ask_dc
-    ask_advanced
+    info "Bandwidth, buffers, windows, carrier counts : automatic (the core measures the path)"
     echo ""
 
     case "$TRANSPORT" in
         dc6)     write_client_config_dc6 "$SERVER_IP" "$SERVER_PORT" "$PSK" "$DC6_IPV6" ;;
+        nova)    write_client_config_nova "$SERVER_IP" "$SERVER_PORT" "$PSK" || return 1 ;;
         tcp)     write_client_config_tcp     "$SERVER_IP" "$SERVER_PORT" "$PSK" ;;
         ws)      write_client_config_ws      "$SERVER_IP" "$SERVER_PORT" "$PSK" "$WS_PATH" ;;
         wss)     write_client_config_wss     "$SERVER_IP" "$SERVER_PORT" "$PSK" "$WS_PATH" ;;
