@@ -324,8 +324,6 @@ ask_transport() {
 }
 
 select_transport_release() {
-    # Every transport of this core (lanes, the KCP carrier of the TCP family, the
-    # lane-aware KCP control) needs the same release on BOTH ends.
     CHANNEL="release"; VERSION="latest"
     local min="v4.3.0"
     case "$TRANSPORT" in
