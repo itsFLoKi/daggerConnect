@@ -327,7 +327,7 @@ select_transport_release() {
     # Every transport of this core (lanes, the KCP carrier of the TCP family, the
     # lane-aware KCP control) needs the same release on BOTH ends.
     CHANNEL="release"; VERSION="latest"
-    local min="v4.5.0"
+    local min="v4.3.0"
     case "$TRANSPORT" in
         nova|quantum|quantum+) info "${TRANSPORT}: the same version (${min}+) is needed on BOTH endpoints." ;;
     esac
@@ -459,7 +459,7 @@ show_new_transport_summary() {
         dc6)
             info "IPv6 tunnel endpoint : [${DC6_IPV6}]:${port}"
             info "License IPv4 : ${SERVER_PUBLIC_IP:-${SERVER_IP}}"
-            warn "Allow TCP on the tunnel port in the server's IPv6 firewall; both hosts need working IPv6 routing."
+            warn "Allow TCP and UDP on the tunnel port in the server's IPv6 firewall; both hosts need working IPv6 routing."
             ;;
     esac
     return 0
