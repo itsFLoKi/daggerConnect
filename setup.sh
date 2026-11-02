@@ -13,6 +13,7 @@ if [ ! -t 1 ] || [ "${TERM:-dumb}" = dumb ] || [ -n "${NO_COLOR+x}" ]; then
 fi
 
 LAUNCHER="/usr/local/bin/DaggerLauncher"
+TRANSPORT_MIN_VERSION="v4.3.0"
 LAUNCHER_LATEST_URL="https://github.com/itsFLoKi/daggerConnect/releases/latest/download/DaggerLauncher"
 CONFIG_DIR="/etc/DaggerConnect"
 CONFIG=""
@@ -158,6 +159,24 @@ validate_label() {
     echo "$1" | grep -qE '^[A-Za-z0-9_-]+$'
 }
 
+service_name_taken_by_system() {
+    local f="/etc/systemd/system/$1.service"
+    if [ -f "/lib/systemd/system/$1.service" ] || [ -f "/usr/lib/systemd/system/$1.service" ]; then
+        return 0
+    fi
+    [ -f "$f" ] && ! grep -qE 'DaggerConnect|DaggerLauncher' "$f"
+}
+
+ask_psk() {
+    while true; do
+        ask_required PSK "$1"
+        case "$PSK" in
+            *\"*|*\\*) warn "The PSK cannot contain double quotes or backslashes." ;;
+            *) break ;;
+        esac
+    done
+}
+
 ask_service_name() {
     local svc_name svc_file
 
@@ -169,6 +188,10 @@ ask_service_name() {
         fi
         if ! validate_label "$LABEL"; then
             warn "Only letters, numbers, - and _ are allowed."
+            continue
+        fi
+        if service_name_taken_by_system "$LABEL"; then
+            warn "A system service is already called ${LABEL}. Choose another name."
             continue
         fi
 
@@ -308,11 +331,15 @@ ask_transport() {
             *) warn "Please enter 1-13 or transport name." ;;
         esac
     done
+    case "$TRANSPORT" in
+        tcp|ws|wss|http|https|xhttp|xhttps)
+            info "If this does not stay connected on your route, use quantum, nova or tun instead." ;;
+    esac
 }
 
 select_transport_release() {
     CHANNEL="release"; VERSION="latest"
-    local min="v4.3.0"
+    local min="$TRANSPORT_MIN_VERSION"
     case "$TRANSPORT" in
         nova|quantum|quantum+) info "${TRANSPORT}: the same version (${min}+) is needed on BOTH endpoints." ;;
     esac
@@ -336,7 +363,7 @@ except ValueError:
 config_needs_new_transport_core() {
     python3 -c '
 import json, re, sys
-targets = (sys.argv[2],) if len(sys.argv) > 2 and sys.argv[2] else ("dc6",)
+targets = tuple(sys.argv[2].split(",")) if len(sys.argv) > 2 and sys.argv[2] else ("dc6",)
 try:
     text = open(sys.argv[1], encoding="utf-8").read()
     try:
@@ -417,15 +444,16 @@ show_firewall_note() {
     knock=$((port + 10000)); [ "$knock" -gt 65535 ] && knock=$((port - 1000))
     case "$TRANSPORT" in
         tcp|ws|wss|http|https)
-            echo -e "  ${DIM}Firewall: TCP ${port}; also UDP ${port} (the KCP carrier takes over when TCP will not connect).${NC}" ;;
+            echo -e "  ${DIM}Firewall: TCP ${port}.${NC}" ;;
         xhttp|xhttps)
-            [ "$XHTTP_CDN" = "true" ] || echo -e "  ${DIM}Firewall: TCP ${port}; also UDP ${port} (KCP carrier).${NC}" ;;
+            [ "$XHTTP_CDN" = "true" ] || echo -e "  ${DIM}Firewall: TCP ${port}.${NC}" ;;
         quantum+)
             echo -e "  ${YELLOW}Firewall: UDP ${port}, UDP ${knock} (knock) and TCP ${lane} (lane, used where UDP is cut).${NC}" ;;
         quantum)
             echo -e "  ${YELLOW}Firewall: TCP ${port}..$((port + 255)) (raw range) and TCP ${lane} (lane).${NC}" ;;
         nova)
-            echo -e "  ${YELLOW}Firewall: TCP ${port}..$((port + 255)) (raw range) and TCP ${lane} (lane).${NC}" ;;
+            echo -e "  ${YELLOW}Firewall: TCP ${port}..$((port + 255)) (raw range) and TCP ${lane} (lane).${NC}"
+            echo -e "  ${DIM}Client side: TCP ${lane} in is optional; the lanes pick whichever side opens them faster.${NC}" ;;
         tun)
             echo -e "  ${YELLOW}Firewall: TCP $(lane_tcp_port "${TUN_L4_PORT:-443}") (lane; the raw wire needs no port).${NC}" ;;
     esac
@@ -763,19 +791,6 @@ ask_ssl_cert() {
     esac
 }
 
-check_ptrace_scope() {
-    local f=/proc/sys/kernel/yama/ptrace_scope
-    [ -r "$f" ] || return 0
-    local val
-    val=$(cat "$f" 2>/dev/null)
-    if [ "$val" = "0" ]; then
-        echo ""
-        warn "kernel.yama.ptrace_scope is 0 -- any same-user process can ptrace-attach and dump this binary from memory."
-        echo -e "  ${DIM}Recommended: sysctl -w kernel.yama.ptrace_scope=2   (or 3, which needs a reboot to undo)${NC}"
-        echo -e "  ${DIM}Persist across reboots: echo 'kernel.yama.ptrace_scope=2' >> /etc/sysctl.d/99-daggerconnect.conf${NC}"
-    fi
-}
-
 tune_network() {
     info "This core tunes kernel buffer/queue ceilings automatically at tunnel startup."
     info "Existing sysctl files, congestion control and interface queues are preserved."
@@ -801,6 +816,25 @@ download_latest_launcher() {
         warn "Latest launcher asset is not a valid Linux ELF binary (size=${size}, magic=${magic:-unknown})."
         return 1
     fi
+
+    # A checksum published next to the binary decides. Without one, what vouches
+    # for the file is HTTPS and the checks above.
+    local sum_tmp want got
+    sum_tmp=$(mktemp "${LAUNCHER}.sum.XXXXXX")
+    if command -v sha256sum >/dev/null 2>&1 && curl --fail --silent --location \
+        --retry 2 --retry-delay 2 --connect-timeout 15 --max-time 30 \
+        -o "$sum_tmp" "${LAUNCHER_LATEST_URL}.sha256"; then
+        want=$(awk 'NR==1{print tolower($1)}' "$sum_tmp")
+        got=$(sha256sum "$tmp" | awk '{print $1}')
+        if [ "$want" != "$got" ]; then
+            rm -f "$tmp" "$sum_tmp"
+            warn "Latest launcher asset does not match its published checksum."
+            return 1
+        fi
+    else
+        info "No launcher checksum published; relying on HTTPS and the format check."
+    fi
+    rm -f "$sum_tmp"
 
     chmod 0755 "$tmp"
     if [ -f "$LAUNCHER" ] && cmp -s "$tmp" "$LAUNCHER"; then
@@ -1057,8 +1091,8 @@ switch_channel() {
     local svc_role="" svc_min=""
     for cfg_candidate in "${CONFIG_DIR}/${svc}.json" "${CONFIG_DIR}/${svc}.yaml"; do
         [ -f "$cfg_candidate" ] || continue
-        if config_needs_new_transport_core "$cfg_candidate"; then
-            svc_min="v4.2.9"
+        if config_needs_new_transport_core "$cfg_candidate" "dc6,nova,quantum,quantum+"; then
+            svc_min="$TRANSPORT_MIN_VERSION"
         fi
         if grep -qE '"mode"[[:space:]]*:[[:space:]]*"server"|^[[:space:]]*mode[[:space:]]*:[[:space:]]*server' "$cfg_candidate"; then
             svc_role="server"; break
@@ -1068,10 +1102,10 @@ switch_channel() {
     done
 
     if [ -n "$svc_role" ]; then
-        ask_version "$svc_role" "$svc_min" "${svc_min:+v4.2.8}"
+        ask_version "$svc_role" "$svc_min" "$svc_min"
     else
         warn "Could not determine whether '${svc}' is a server or client from its config -- falling back to manual entry."
-        ask_channel_manual "$svc_min" "${svc_min:+v4.2.8}"
+        ask_channel_manual "$svc_min" "$svc_min"
     fi
     local new_channel="$CHANNEL" new_version="$VERSION"
 
@@ -1099,9 +1133,9 @@ switch_channel() {
     set_unit_env DC_VERSION "$new_version"
 
     if grep -q '^RestartSec=' "$svc_file" 2>/dev/null; then
-        sed -i 's/^RestartSec=.*/RestartSec=60/' "$svc_file"
+        sed -i 's/^RestartSec=.*/RestartSec=10/' "$svc_file"
     else
-        sed -i '/^Restart=/a RestartSec=60' "$svc_file"
+        sed -i '/^Restart=/a RestartSec=10' "$svc_file"
     fi
     if grep -q '^RestartPreventExitStatus=' "$svc_file" 2>/dev/null; then
         sed -i 's/^RestartPreventExitStatus=.*/RestartPreventExitStatus=78/' "$svc_file"
@@ -1115,7 +1149,7 @@ switch_channel() {
     sleep 2
     if systemctl is-active --quiet "$svc"; then
         ok "Service is active with channel=${new_channel} version=${new_version}."
-        info "Check its startup log for 'launcher: fetched version=' and tunnel readiness; active alone does not confirm a working tunnel."
+        info "Active alone does not confirm a working tunnel: look for 'Connected !' in its logs."
     else
         warn "Service failed to start on the new setting -- reverting. Logs:"
         journalctl -u "$svc" -n 20 --no-pager
@@ -2656,10 +2690,29 @@ write_client_config_tun() {
     fi
 }
 
+config_write_begin() {
+    CONFIG_UMASK=$(umask)
+    umask 077
+    rm -f "${CONFIG}.prev"
+    if [ -f "$CONFIG" ]; then
+        cp -p "$CONFIG" "${CONFIG}.prev"
+    fi
+}
+
+config_write_end() {
+    umask "$CONFIG_UMASK"
+}
+
 install_service() {
     if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$CONFIG" >/dev/null 2>&1; then
-        error "Invalid JSON configuration; service unchanged. Check quoted input values."
+        if [ -f "${CONFIG}.prev" ]; then
+            mv -f "${CONFIG}.prev" "$CONFIG"
+        else
+            rm -f "$CONFIG"
+        fi
+        error "Invalid JSON configuration; service and config unchanged. Check quoted input values."
     fi
+    rm -f "${CONFIG}.prev"
     local extra_env=""
     if [ -n "$SERVER_PUBLIC_IP" ]; then
         extra_env="Environment=DC_SERVER_PUBLIC_IP=${SERVER_PUBLIC_IP}"
@@ -2678,7 +2731,7 @@ Environment=DC_VERSION=${VERSION:-latest}
 ${extra_env}
 ExecStart=${LAUNCHER} -c ${CONFIG}
 Restart=always
-RestartSec=60
+RestartSec=10
 RestartPreventExitStatus=78
 TimeoutStopSec=20
 KillSignal=SIGTERM
@@ -2695,14 +2748,31 @@ EOF
     ok "Service installed: ${SERVICE_NAME}"
 }
 
+SERVICE_STARTED="false"
 start_service() {
+    local waited=0
+    SERVICE_STARTED="false"
     systemctl restart "$SERVICE_NAME"
-    sleep 2
+    while [ "$waited" -lt 8 ]; do
+        sleep 1
+        waited=$((waited + 1))
+        systemctl is-active --quiet "$SERVICE_NAME" || break
+    done
     if systemctl is-active --quiet "$SERVICE_NAME"; then
+        SERVICE_STARTED="true"
         ok "Service is running."
     else
         warn "Service failed to start. Logs:"
         journalctl -u "$SERVICE_NAME" -n 20 --no-pager
+    fi
+}
+
+show_install_result() {
+    echo ""
+    if [ "$SERVICE_STARTED" = "true" ]; then
+        echo -e "${GREEN}${BOLD}  $1 installed successfully.${NC}"
+    else
+        echo -e "${YELLOW}${BOLD}  $1 installed, but its service is not running. It retries by itself; see the logs above.${NC}"
     fi
 }
 
@@ -2733,7 +2803,6 @@ ask_pair_profile_id() {
 install_server() {
     hr "Install Server"
     ensure_launcher server
-    check_ptrace_scope
     tune_network
     echo ""
 
@@ -2757,7 +2826,7 @@ install_server() {
         echo ""
     fi
 
-    ask_required PSK "PSK  (must match client)"
+    ask_psk "PSK  (must match client)"
     echo ""
 
     case "$TRANSPORT" in
@@ -2838,6 +2907,7 @@ install_server() {
     info "Bandwidth, buffers, windows, carrier counts : automatic (the core measures the path)"
     echo ""
 
+    config_write_begin
     case "$TRANSPORT" in
         dc6)     write_server_config_dc6 "$PORT" "$PSK" "$DC6_IPV6" "${PORTS[@]}" ;;
         nova)    write_server_config_nova "$PORT" "$PSK" "${PORTS[@]}" || return 1 ;;
@@ -2856,14 +2926,14 @@ install_server() {
                      "$XHTTP_CDN_POOL" "$XHTTP_PEER_IP" "${PORTS[@]}" ;;
         tun)     write_server_config_tun     "$PORT" "$PSK" "$TUN_LOCAL_IP" "$TUN_PEER_IP" "$TUN_LOCAL_ADDR" "$TUN_REMOTE_ADDR" "$TUN_ENCAP" "$TUN_PROFILE" "$TUN_IFACE" "$TUN_SPOOF_SRC" "$TUN_SPOOF_DST" "$TUN_DCPI" "$TUN_NAME" "$TUN_HEARTBEAT_SEC" "$TUN_IDLE_TIMEOUT_SEC" "${PORTS[@]}" ;;
     esac
+    config_write_end
     chmod 0600 "$CONFIG"
     ok "Config written: ${CONFIG}"
 
     install_service
     start_service
 
-    echo ""
-    echo -e "${GREEN}${BOLD}  Server installed successfully.${NC}"
+    show_install_result Server
     echo ""
     echo -e "  Service   : ${BOLD}${SERVICE_NAME}${NC}"
     echo -e "  Channel   : ${BOLD}${CHANNEL}${NC}"
@@ -2939,7 +3009,6 @@ install_client() {
     SERVER_PUBLIC_IP=""
     hr "Install Client"
     ensure_launcher client
-    check_ptrace_scope
     tune_network
     echo ""
 
@@ -2965,7 +3034,7 @@ install_client() {
         echo ""
     fi
 
-    ask_required PSK "PSK  (must match server)"
+    ask_psk "PSK  (must match server)"
     echo ""
 
     case "$TRANSPORT" in
@@ -3061,6 +3130,7 @@ install_client() {
     info "Bandwidth, buffers, windows, carrier counts : automatic (the core measures the path)"
     echo ""
 
+    config_write_begin
     case "$TRANSPORT" in
         dc6)     write_client_config_dc6 "$SERVER_IP" "$SERVER_PORT" "$PSK" "$DC6_IPV6" ;;
         nova)    write_client_config_nova "$SERVER_IP" "$SERVER_PORT" "$PSK" || return 1 ;;
@@ -3079,14 +3149,14 @@ install_client() {
                      "$XHTTP_ORIGIN_PORT" "$CERT_FILE" "$KEY_FILE" "$XHTTP_PUBLIC_IP" ;;
         tun)     write_client_config_tun     "$SERVER_PORT" "$PSK" "$TUN_LOCAL_IP" "$TUN_PEER_IP" "$TUN_LOCAL_ADDR" "$TUN_REMOTE_ADDR" "$TUN_ENCAP" "$TUN_PROFILE" "$TUN_IFACE" "$TUN_SPOOF_SRC" "$TUN_SPOOF_DST" "$TUN_DCPI" "$TUN_NAME" "$TUN_HEARTBEAT_SEC" "$TUN_IDLE_TIMEOUT_SEC" ;;
     esac
+    config_write_end
     chmod 0600 "$CONFIG"
     ok "Config written: ${CONFIG}"
 
     install_service
     start_service
 
-    echo ""
-    echo -e "${GREEN}${BOLD}  Client installed successfully.${NC}"
+    show_install_result Client
     echo ""
     echo -e "  Service   : ${BOLD}${SERVICE_NAME}${NC}"
     echo -e "  Channel   : ${BOLD}${CHANNEL}${NC}"
@@ -3205,12 +3275,15 @@ uninstall() {
         cfg_yaml="${CONFIG_DIR}/${svc_name}.yaml"
         [ -f "$cfg_json" ] && rm -f "$cfg_json" && ok "Removed config: ${cfg_json}"
         [ -f "$cfg_yaml" ] && rm -f "$cfg_yaml" && ok "Removed config: ${cfg_yaml}"
+        rm -f "${cfg_json}.bak" "${cfg_yaml}.bak" "${cfg_json}.prev" "${cfg_yaml}.prev"
+        rm -f "/etc/daggerconnect/tls/${svc_name}.crt" "/etc/daggerconnect/tls/${svc_name}.key"
         rm -f "/etc/letsencrypt/renewal-hooks/deploy/daggerconnect-${svc_name}.sh" 2>/dev/null || true
         ok "Removed service: ${svc_name}"
     done
 
     systemctl daemon-reload
     [ -d "$CONFIG_DIR" ] && [ -z "$(ls -A "$CONFIG_DIR")" ] && rmdir "$CONFIG_DIR"
+    rmdir /etc/daggerconnect/tls /etc/daggerconnect 2>/dev/null || true
     ok "Done."
 }
 
@@ -3305,9 +3378,13 @@ edit_config() {
     pick_service "Edit config for" || return 0
     local svc="${PICKED_SVC%.service}"
 
-    local cfg=""
-    [ -f "${CONFIG_DIR}/${svc}.json" ] && cfg="${CONFIG_DIR}/${svc}.json"
-    [ -f "${CONFIG_DIR}/${svc}.yaml" ] && cfg="${CONFIG_DIR}/${svc}.yaml"
+    local cfg
+    cfg=$(sed -n 's/^ExecStart=.* -c //p' "/etc/systemd/system/${PICKED_SVC}" 2>/dev/null | head -1)
+    if [ ! -f "$cfg" ]; then
+        cfg=""
+        [ -f "${CONFIG_DIR}/${svc}.yaml" ] && cfg="${CONFIG_DIR}/${svc}.yaml"
+        [ -f "${CONFIG_DIR}/${svc}.json" ] && cfg="${CONFIG_DIR}/${svc}.json"
+    fi
     if [ -z "$cfg" ]; then
         warn "No config file found for ${svc}."
         return 0
