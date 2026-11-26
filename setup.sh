@@ -13,8 +13,14 @@ if [ ! -t 1 ] || [ "${TERM:-dumb}" = dumb ] || [ -n "${NO_COLOR+x}" ]; then
 fi
 
 LAUNCHER="/usr/local/bin/DaggerLauncher"
-TRANSPORT_MIN_VERSION="v4.3.0"
-LAUNCHER_LATEST_URL="https://github.com/itsFLoKi/daggerConnect/releases/latest/download/DaggerLauncher"
+TRANSPORT_MIN_VERSION="v5.0.0"
+LAUNCHER_BASE_URL="https://github.com/itsFLoKi/daggerConnect/releases/latest/download"
+# The launcher for this machine; it then fetches the core of the same architecture by itself.
+case "$(uname -m)" in
+    x86_64|amd64)  LAUNCHER_ARCH="amd64"; LAUNCHER_ELF_MACHINE="3e00"; LAUNCHER_LATEST_URL="${LAUNCHER_BASE_URL}/DaggerLauncher" ;;
+    aarch64|arm64) LAUNCHER_ARCH="arm64"; LAUNCHER_ELF_MACHINE="b700"; LAUNCHER_LATEST_URL="${LAUNCHER_BASE_URL}/DaggerLauncher-arm64" ;;
+    *)             LAUNCHER_ARCH="";      LAUNCHER_ELF_MACHINE="";     LAUNCHER_LATEST_URL="" ;;
+esac
 CONFIG_DIR="/etc/DaggerConnect"
 CONFIG=""
 CONFIG_FMT=""
@@ -797,7 +803,11 @@ tune_network() {
 }
 
 download_latest_launcher() {
-    local tmp magic size
+    local tmp magic size machine
+    if [ -z "$LAUNCHER_ARCH" ]; then
+        warn "Only amd64 and arm64 servers are supported (this one reports: $(uname -m))."
+        return 1
+    fi
     mkdir -p "$(dirname "$LAUNCHER")"
     tmp=$(mktemp "${LAUNCHER}.XXXXXX")
 
@@ -814,6 +824,13 @@ download_latest_launcher() {
     if [ "$magic" != "7f454c46" ] || [ "$size" -lt 1048576 ]; then
         rm -f "$tmp"
         warn "Latest launcher asset is not a valid Linux ELF binary (size=${size}, magic=${magic:-unknown})."
+        return 1
+    fi
+
+    machine=$(LC_ALL=C od -An -tx1 -j18 -N2 "$tmp" 2>/dev/null | tr -d ' \n')
+    if [ "$machine" != "$LAUNCHER_ELF_MACHINE" ]; then
+        rm -f "$tmp"
+        warn "Latest launcher asset is not built for this server's architecture (${LAUNCHER_ARCH})."
         return 1
     fi
 
@@ -846,11 +863,36 @@ download_latest_launcher() {
     return 0
 }
 
+# Services pinned to a core older than this installer supports (printed as "name version").
+old_pinned_services() {
+    local svc pinned
+    while read -r svc; do
+        [ -n "$svc" ] || continue
+        pinned=$(sed -n 's/^Environment=DC_VERSION=//p' "${SYSTEMD_DIR:-/etc/systemd/system}/${svc}" 2>/dev/null | head -1)
+        case "$pinned" in
+            v[0-9]*) version_at_least "$pinned" "$TRANSPORT_MIN_VERSION" || printf '%s %s\n' "$svc" "$pinned" ;;
+        esac
+    done < <(list_services)
+}
+
+warn_old_pinned_services() {
+    local rows svc pinned
+    rows=$(old_pinned_services)
+    [ -n "$rows" ] || return 0
+    echo ""
+    while read -r svc pinned; do
+        warn "${svc} is still on core ${pinned}, which the new launcher cannot start."
+    done <<< "$rows"
+    info "Before restarting it: menu 9 (Core Version) -> ${TRANSPORT_MIN_VERSION}, on BOTH servers of that tunnel."
+    echo ""
+}
+
 ensure_launcher() {
     local role="$1"
-    info "Checking the latest DaggerLauncher release..."
+    info "Checking the latest DaggerLauncher release (${LAUNCHER_ARCH:-unsupported architecture})..."
     if download_latest_launcher; then
         ok "DaggerLauncher ready : ${LAUNCHER}"
+        warn_old_pinned_services
         return 0
     fi
     if [ -x "$LAUNCHER" ]; then
@@ -872,7 +914,11 @@ update_launcher() {
 
     mapfile -t SERVICES < <(list_services)
     local running=()
+    warn_old_pinned_services
+    local old
+    old=$(old_pinned_services | cut -d" " -f1)
     for svc in "${SERVICES[@]}"; do
+        grep -qxF -- "$svc" <<< "$old" && continue
         systemctl is-active --quiet "$svc" && running+=("$svc")
     done
 
@@ -1276,6 +1322,95 @@ ask_connection_pool() {
     ask_num_range CLIENT_CONN_POOL "Minimum connections per path" "$default_pool" 1 64
 }
 
+# Virtual IP: a private /30 pair between the two servers of one tunnel. The core
+# creates the device; both ends must name each other's addresses (mirrored).
+virtual_ip_tool() {
+    python3 -c '
+import glob, ipaddress, json, sys
+mode, directory, current = sys.argv[1:4]
+nets, names = [], set()
+for path in glob.glob(directory + "/*.json"):
+    if path == current:
+        continue
+    try:
+        with open(path, encoding="utf-8") as handle:
+            v = json.load(handle).get("virtual_ip") or {}
+        if v.get("enabled"):
+            names.add(v.get("name") or "dcvip0")
+            nets.append(ipaddress.ip_interface(v["local"]).network)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+if mode == "name":
+    print(next("dcvip%d" % i for i in range(1000) if "dcvip%d" % i not in names))
+elif mode == "free":
+    print(next(i for i in range(256) if not any(ipaddress.ip_network("10.88.%d.0/30" % i).overlaps(n) for n in nets)))
+else:
+    try:
+        local, peer = (ipaddress.ip_interface(a + "/30") for a in sys.argv[4:6])
+        ok = (local.version == 4 and peer.version == 4 and local.network == peer.network and local.ip != peer.ip
+              and all(i.ip.is_private and not i.ip.is_loopback and not i.ip.is_link_local
+                      and i.ip not in (i.network.network_address, i.network.broadcast_address) for i in (local, peer)))
+        if not ok:
+            sys.exit(1)
+        if any(local.network.overlaps(n) for n in nets):
+            sys.exit(2)
+    except ValueError:
+        sys.exit(1)
+' "$1" "$CONFIG_DIR" "$CONFIG" "${@:2}"
+}
+
+ask_virtual_ip() {
+    local role="$1" free mine=1 other=2 rc
+    VIP_ENABLED="false"
+    [ "$TRANSPORT" = "tun" ] && return 0
+    echo ""
+    echo -e "  ${BOLD}Virtual IP:${NC}"
+    echo ""
+    info "A private IP pair between the two servers of this tunnel; programs on them"
+    info "reach each other directly on it. Enable it on BOTH ends."
+    ask VIP_CHOICE "Enable Virtual IP? (y/n)" "n"
+    case "$VIP_CHOICE" in y|Y) ;; *) return 0 ;; esac
+    [ "$role" = "server" ] || { mine=2; other=1; }
+    free=$(virtual_ip_tool free) || error "Cannot choose a Virtual IP pair."
+    info "The other end must use the same two addresses, swapped."
+    while true; do
+        ask VIP_LOCAL "Virtual IP of THIS server" "10.88.${free}.${mine}"
+        ask VIP_PEER  "Virtual IP of the OTHER server" "10.88.${free}.${other}"
+        VIP_LOCAL="${VIP_LOCAL%%/*}"; VIP_PEER="${VIP_PEER%%/*}"
+        rc=0
+        virtual_ip_tool check "$VIP_LOCAL" "$VIP_PEER" || rc=$?
+        [ "$rc" -eq 0 ] && break
+        if [ "$rc" -eq 2 ]; then
+            warn "That range is already used by another tunnel on this server."
+        else
+            warn "Use two private IPv4 addresses of one /30, e.g. 10.88.0.1 and 10.88.0.2."
+        fi
+    done
+    VIP_NAME=$(virtual_ip_tool name) || error "Cannot choose a Virtual IP device name."
+    VIP_ENABLED="true"
+}
+
+apply_virtual_ip() {
+    [ "${VIP_ENABLED:-false}" = "true" ] || return 0
+    python3 -c '
+import json, os, sys
+path, name, local, peer = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    doc = json.load(handle)
+doc["virtual_ip"] = {"enabled": True, "name": name, "local": local + "/30", "peer": peer + "/30", "mtu": 1280}
+tmp = path + ".vip"
+with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as handle:
+    json.dump(doc, handle, indent=2)
+    handle.write("\n")
+os.replace(tmp, path)
+' "$CONFIG" "$VIP_NAME" "$VIP_LOCAL" "$VIP_PEER" || warn "Virtual IP could not be added to the config."
+}
+
+show_virtual_ip_summary() {
+    [ "${VIP_ENABLED:-false}" = "true" ] || return 0
+    echo -e "  Virtual IP: ${BOLD}${VIP_LOCAL}${NC}  other end ${BOLD}${VIP_PEER}${NC}  ${DIM}(device ${VIP_NAME}; set the mirrored pair there)${NC}"
+}
+
 ask_socks5() {
     echo ""
     echo -e "  ${BOLD}Standalone SOCKS5 Proxy:${NC}"
@@ -1350,7 +1485,7 @@ quantum_profile_yaml() {
 ask_quantum_settings() {
     ask_num_range QM_MTU "MTU" 1350 512 9000
     while true; do
-        ask QM_BLOCK "Header cipher (aes/salsa20/none; match both ends)" aes
+        ask QM_BLOCK "Header cipher (salsa20/aes/none; match both ends)" salsa20
         case "$QM_BLOCK" in
             aes|salsa20|none) break ;;
             *) warn "Choose aes, salsa20 or none." ;;
@@ -2902,6 +3037,7 @@ install_server() {
     echo ""
 
     ask_socks5
+    ask_virtual_ip server
     echo ""
 
     info "Bandwidth, buffers, windows, carrier counts : automatic (the core measures the path)"
@@ -2927,6 +3063,7 @@ install_server() {
         tun)     write_server_config_tun     "$PORT" "$PSK" "$TUN_LOCAL_IP" "$TUN_PEER_IP" "$TUN_LOCAL_ADDR" "$TUN_REMOTE_ADDR" "$TUN_ENCAP" "$TUN_PROFILE" "$TUN_IFACE" "$TUN_SPOOF_SRC" "$TUN_SPOOF_DST" "$TUN_DCPI" "$TUN_NAME" "$TUN_HEARTBEAT_SEC" "$TUN_IDLE_TIMEOUT_SEC" "${PORTS[@]}" ;;
     esac
     config_write_end
+    apply_virtual_ip
     chmod 0600 "$CONFIG"
     ok "Config written: ${CONFIG}"
 
@@ -2999,6 +3136,7 @@ install_server() {
     if [ "$SOCKS5_ENABLED" = "true" ]; then
         echo -e "  SOCKS5    : ${BOLD}${SOCKS5_BIND}${NC}"
     fi
+    show_virtual_ip_summary
     echo -e "  Config    : ${BOLD}${CONFIG}${NC}"
     echo ""
     echo -e "  Logs      : journalctl -u ${SERVICE_NAME} -f"
@@ -3127,6 +3265,9 @@ install_client() {
         echo ""
     fi
 
+    ask_virtual_ip client
+    echo ""
+
     info "Bandwidth, buffers, windows, carrier counts : automatic (the core measures the path)"
     echo ""
 
@@ -3150,6 +3291,7 @@ install_client() {
         tun)     write_client_config_tun     "$SERVER_PORT" "$PSK" "$TUN_LOCAL_IP" "$TUN_PEER_IP" "$TUN_LOCAL_ADDR" "$TUN_REMOTE_ADDR" "$TUN_ENCAP" "$TUN_PROFILE" "$TUN_IFACE" "$TUN_SPOOF_SRC" "$TUN_SPOOF_DST" "$TUN_DCPI" "$TUN_NAME" "$TUN_HEARTBEAT_SEC" "$TUN_IDLE_TIMEOUT_SEC" ;;
     esac
     config_write_end
+    apply_virtual_ip
     chmod 0600 "$CONFIG"
     ok "Config written: ${CONFIG}"
 
@@ -3201,6 +3343,7 @@ install_client() {
             echo -e "  Route     : ${BOLD}direct to the server${NC}"
         fi
     fi
+    show_virtual_ip_summary
     echo -e "  Config    : ${BOLD}${CONFIG}${NC}"
     echo ""
     echo -e "  Logs      : journalctl -u ${SERVICE_NAME} -f"
@@ -3534,8 +3677,8 @@ linktest_run_core() {
             echo ""
             warn "The core version the launcher fetched does not include Link Test."
             if [ "$attempt" -eq 1 ]; then
-                info "Pick stable v4.2.8+ or beta v4.3.1+."
-                ask_version "$role" "v4.3.1" "v4.2.8"
+                info "Pick ${TRANSPORT_MIN_VERSION} or newer."
+                ask_version "$role" "$TRANSPORT_MIN_VERSION" "$TRANSPORT_MIN_VERSION"
                 continue
             fi
         fi
@@ -3543,6 +3686,18 @@ linktest_run_core() {
     done
     rm -f -- "$log"
     return "$rc"
+}
+
+# linktest_firewall_hint names the firewall that is active here, so the operator knows
+# where to allow the test ports. Nothing is changed.
+linktest_firewall_hint() {
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+        warn "ufw is active here: allow the listed ports, e.g. ufw allow <port>/tcp and ufw allow <port>/udp"
+    elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+        warn "firewalld is active here: allow the listed ports, e.g. firewall-cmd --add-port=<port>/tcp --add-port=<port>/udp"
+    elif command -v iptables >/dev/null 2>&1 && iptables -S INPUT 2>/dev/null | grep -qE '^-P INPUT (DROP|REJECT)|-j (DROP|REJECT)'; then
+        warn "iptables here drops or rejects some incoming traffic: allow the listed ports (TCP and UDP)."
+    fi
 }
 
 linktest_run() {
@@ -3555,8 +3710,12 @@ linktest_run() {
     if [ "$role" = "server" ]; then
         ask_server_public_ip
         echo ""
-        info "On the other server choose Tester > Client and enter this IP: ${SERVER_PUBLIC_IP}"
-        info "Allow the test ports (TCP and UDP) in this server's firewall while testing."
+        info "Wait until this side shows \"LINK TEST waiting for the Client\" (after its licence check),"
+        info "then on the other server choose Tester > Client and enter this IP: ${SERVER_PUBLIC_IP}"
+        info "Allow the ports it lists (TCP and UDP) in this server's firewall while testing."
+        linktest_firewall_hint
+    else
+        info "If the Server side is still starting, this side waits up to 90 seconds for it."
     fi
     trap linktest_cleanup EXIT
     trap 'linktest_cleanup; exit 130' INT TERM
@@ -3625,7 +3784,7 @@ linktest_menu() {
 
 show_banner() {
     echo ""
-    echo -e "  ${CYAN}${BOLD}DaggerConnect Installer${NC}  -  @DaggerConnect"
+    echo -e "  ${CYAN}${BOLD}DaggerConnect Installer v5${NC}  -  @DaggerConnect"
     echo ""
 }
 
